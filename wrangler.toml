@@ -1,0 +1,16 @@
+name = "gbretail-backend"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+PORT = "8787"
+CORS_ORIGIN = "http://localhost:3000"
+USE_NEON = "1"
+NODE_ENV = "production"
+
+# Secrets (set via `wrangler secret put DATABASE_URL`)
+# DATABASE_URL = "postgresql://..."
+
+[observability]
+enabled = true

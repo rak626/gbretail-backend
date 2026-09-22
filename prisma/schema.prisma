@@ -1,0 +1,111 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Product {
+  id             String      @id @default(cuid())
+  name           String
+  is_loose       Boolean     @default(false)
+  rate_per_kg    Float?
+  barcode        String?     @unique
+  price          Float?
+  costPrice      Float       @default(0)
+  unit           String      @default("pcs")
+  category       String
+  preset_weights Float[]     @default([])
+  preset_prices  Float[]     @default([])
+  stockQuantity  Float       @default(0)
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+  orderItems     OrderItem[]
+
+  @@index([category])
+  @@index([name])
+}
+
+model Customer {
+  id            String        @id @default(cuid())
+  name          String
+  phone         String?       @unique
+  balance       Float         @default(0)
+  totalSpent    Float         @default(0)
+  totalOrders   Int           @default(0)
+  lastOrderAt   DateTime?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  orders        Order[]
+  ledgerEntries LedgerEntry[]
+
+  @@index([name])
+  @@index([phone])
+}
+
+model Order {
+  id            String        @id @default(cuid())
+  orderNumber   String        @unique
+  items         OrderItem[]
+  total         Float
+  discount      Float         @default(0)
+  paymentMethod String        // "cash" | "upi" | "khata" | "split"
+  customerId    String?
+  customer      Customer?     @relation(fields: [customerId], references: [id])
+  status        String        @default("completed")
+  orderDate     DateTime      @default(now())
+  syncedAt      DateTime?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  ledgerEntries LedgerEntry[]
+
+  @@index([customerId])
+  @@index([createdAt])
+  @@index([paymentMethod])
+  @@index([orderNumber])
+}
+
+model OrderItem {
+  id        String   @id @default(cuid())
+  orderId   String
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId String?
+  product   Product? @relation(fields: [productId], references: [id])
+  name      String
+  price     Float
+  unit      String
+  quantity  Float?
+  weight    Float?
+  lineTotal Float
+  isCustom  Boolean  @default(false)
+  costPrice Float?
+  category  String?
+
+  @@index([orderId])
+  @@index([productId])
+  @@index([category])
+}
+
+model LedgerEntry {
+  id         String    @id @default(cuid())
+  customerId String
+  customer   Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  orderId    String?
+  order      Order?    @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  amount     Float
+  creditDays Int       @default(30)
+  dueDate    DateTime
+  status     String    @default("pending") // pending | settled | overdue (computed)
+  note       String?
+  settledAt  DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@index([customerId])
+  @@index([status])
+  @@index([dueDate])
+  @@index([createdAt])
+  @@index([settledAt])
+  @@index([orderId])
+}

@@ -1,0 +1,38 @@
+{
+  "name": "gbretail-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "dev:edge": "wrangler dev --port 8787",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "db:deploy": "prisma migrate deploy",
+    "db:seed": "tsx prisma/seed.ts",
+    "db:push": "prisma db push"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.13.7",
+    "@neondatabase/serverless": "^1.0.1",
+    "@prisma/adapter-neon": "^7.10.0",
+    "@prisma/adapter-pg": "^7.10.0",
+    "@prisma/client": "^7.10.0",
+    "cors": "^2.8.5",
+    "dotenv": "^18.0.1",
+    "hono": "^4.9.0",
+    "pg": "^8.23.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/node": "^20",
+    "@types/pg": "^8.23.1",
+    "@types/ws": "^8.18.1",
+    "prisma": "^7.10.0",
+    "tsx": "^4.23.15",
+    "typescript": "^5",
+    "wrangler": "^3.110.3"
+  }
+}
