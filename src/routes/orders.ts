@@ -99,6 +99,7 @@ orders.post("/", async (c) => {
 
     let resolvedCustomerId = customerId ?? null;
 
+    const now = new Date();
     if (!resolvedCustomerId && (customerName || customerPhone) && paymentMethod === "khata") {
       const phone = customerPhone ? String(customerPhone).trim().replace(/\D/g, "").slice(0, 10) : null;
       const name = customerName ? String(customerName).trim() : "Walk-in Customer";
@@ -106,13 +107,16 @@ orders.post("/", async (c) => {
         const existing = await prisma.customer.findUnique({ where: { phone } });
         if (existing) {
           resolvedCustomerId = existing.id;
+          const isFirst = !(existing as any).firstOrderAt;
           await prisma.customer.update({
             where: { id: existing.id },
             data: {
               balance: { increment: total },
               totalSpent: { increment: total },
               totalOrders: { increment: 1 },
-              lastOrderAt: new Date(),
+              lastOrderAt: now,
+              ...(isFirst ? { firstOrderAt: now } : {}),
+              ...( (existing as any).deletedAt ? { deletedAt: null } : {}),
             },
           });
         } else {
@@ -123,25 +127,30 @@ orders.post("/", async (c) => {
               balance: total,
               totalSpent: total,
               totalOrders: 1,
-              lastOrderAt: new Date(),
+              firstOrderAt: now,
+              lastOrderAt: now,
             },
           });
           resolvedCustomerId = cust.id;
         }
       } else if (name && name !== "Walk-in Customer") {
         const cust = await prisma.customer.create({
-          data: { name, balance: total, totalSpent: total, totalOrders: 1, lastOrderAt: new Date() },
+          data: { name, balance: total, totalSpent: total, totalOrders: 1, firstOrderAt: now, lastOrderAt: now },
         });
         resolvedCustomerId = cust.id;
       }
     } else if (resolvedCustomerId) {
       try {
+        const existing = await prisma.customer.findUnique({ where: { id: resolvedCustomerId }, select: { firstOrderAt: true, deletedAt: true } });
+        const isFirst = !existing?.firstOrderAt;
         await prisma.customer.update({
           where: { id: resolvedCustomerId },
           data: {
             totalSpent: { increment: total },
             totalOrders: { increment: 1 },
-            lastOrderAt: new Date(),
+            lastOrderAt: now,
+            ...(isFirst ? { firstOrderAt: now } : {}),
+            ...(existing?.deletedAt ? { deletedAt: null } : {}),
             ...(paymentMethod === "khata" ? { balance: { increment: total } } : {}),
           },
         });

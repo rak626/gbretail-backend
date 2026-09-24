@@ -31,10 +31,16 @@ model Customer {
   id            String        @id @default(cuid())
   name          String
   phone         String?       @unique
+  email         String?
+  address       String?
+  notes         String?
+  creditLimit   Float?
   balance       Float         @default(0)
   totalSpent    Float         @default(0)
   totalOrders   Int           @default(0)
+  firstOrderAt  DateTime?
   lastOrderAt   DateTime?
+  deletedAt     DateTime?
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
   orders        Order[]
@@ -42,6 +48,11 @@ model Customer {
 
   @@index([name])
   @@index([phone])
+  @@index([deletedAt])
+  @@index([lastOrderAt])
+  @@index([firstOrderAt])
+  @@index([balance])
+  @@index([totalSpent])
 }
 
 model Order {
