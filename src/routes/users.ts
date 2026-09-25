@@ -15,15 +15,15 @@ users.get("/", async (c) => {
     if (user.role === "SUPER_ADMIN") {
       const where: Record<string, unknown> = { deletedAt: null };
       if (queryShopId) (where as any).shopId = queryShopId;
-      const items = await prisma.user.findMany({ where, select: { id: true, shopId: true, email: true, name: true, role: true, isActive: true, createdAt: true, shop: { select: { id: true, name: true } } }, orderBy: { createdAt: "desc" } });
+      const items = await prisma.user.findMany({ where, select: { id: true, shopId: true, email: true, name: true, role: true, canManageInventory: true, isActive: true, createdAt: true, shop: { select: { id: true, name: true } } }, orderBy: { createdAt: "desc" } });
       return c.json({ users: items });
     }
     if (user.role === "SHOP_OWNER") {
-      const items = await prisma.user.findMany({ where: { shopId: user.shopId, deletedAt: null }, select: { id: true, shopId: true, email: true, name: true, role: true, isActive: true, createdAt: true }, orderBy: { createdAt: "desc" } });
+      const items = await prisma.user.findMany({ where: { shopId: user.shopId, deletedAt: null }, select: { id: true, shopId: true, email: true, name: true, role: true, canManageInventory: true, isActive: true, createdAt: true }, orderBy: { createdAt: "desc" } });
       return c.json({ users: items });
     }
     // STAFF can only see themselves? Return self
-    const self = await prisma.user.findUnique({ where: { id: user.userId }, select: { id: true, shopId: true, email: true, name: true, role: true, isActive: true, createdAt: true } });
+    const self = await prisma.user.findUnique({ where: { id: user.userId }, select: { id: true, shopId: true, email: true, name: true, role: true, canManageInventory: true, isActive: true, createdAt: true } });
     return c.json({ users: self ? [self] : [] });
   } catch (e) {
     return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);
@@ -35,7 +35,7 @@ users.get("/:id", async (c) => {
   const user = (c as any).get("user" as any) as any;
   const id = c.req.param("id");
   try {
-    const target = await prisma.user.findUnique({ where: { id }, select: { id: true, shopId: true, email: true, name: true, role: true, isActive: true, createdAt: true, deletedAt: true, shop: { select: { id: true, name: true } } } });
+    const target = await prisma.user.findUnique({ where: { id }, select: { id: true, shopId: true, email: true, name: true, role: true, canManageInventory: true, isActive: true, createdAt: true, deletedAt: true, shop: { select: { id: true, name: true } } } });
     if (!target || (target as any).deletedAt) return c.json({ error: "User not found" }, 404);
     if (user.role !== "SUPER_ADMIN" && (target as any).shopId !== user.shopId) return c.json({ error: "Forbidden" }, 403);
     if (user.role === "STAFF" && user.userId !== id) return c.json({ error: "Forbidden" }, 403);
@@ -87,8 +87,11 @@ users.post("/", requireRole("SUPER_ADMIN", "SHOP_OWNER") as any, async (c) => {
         name,
         role,
         shopId,
+        // Owner-only grant at creation (STAFF only; owner always has it).
+        // SUPER_ADMIN cannot grant — only the shop owner can.
+        canManageInventory: role === "STAFF" && actor.role === "SHOP_OWNER" ? Boolean(body.canManageInventory) : false,
       },
-      select: { id: true, shopId: true, email: true, name: true, role: true, isActive: true, createdAt: true },
+      select: { id: true, shopId: true, email: true, name: true, role: true, canManageInventory: true, isActive: true, createdAt: true },
     });
     return c.json({ user: created }, 201);
   } catch (e) {
@@ -132,7 +135,22 @@ users.patch("/:id", async (c) => {
       data.passwordHash = await hashPassword(p);
     }
     if (body.isActive !== undefined) {
+      // Activate/deactivate rules:
+      // - STAFF: no permission at all.
+      // - SHOP_OWNER: own-shop STAFF only (never self, never owners/supers).
+      // - SUPER_ADMIN: SHOP_OWNER only (never staff, never self).
+      if (actor.userId === id) return c.json({ error: "Cannot change your own status" }, 403);
       if (actor.role === "STAFF") return c.json({ error: "Forbidden" }, 403);
+      const targetRole = String((target as any).role ?? "").toUpperCase();
+      if (actor.role === "SHOP_OWNER") {
+        if (targetRole !== "STAFF" || (target as any).shopId !== actor.shopId) {
+          return c.json({ error: "Owners can only change status of own-shop staff" }, 403);
+        }
+      } else if (actor.role === "SUPER_ADMIN") {
+        if (targetRole !== "SHOP_OWNER") {
+          return c.json({ error: "Super admin can only change status of shop owners" }, 403);
+        }
+      }
       data.isActive = Boolean(body.isActive);
     }
     if (body.role !== undefined) {
@@ -145,9 +163,18 @@ users.patch("/:id", async (c) => {
       if (actor.role !== "SUPER_ADMIN") return c.json({ error: "Only SUPER_ADMIN can change shop" }, 403);
       data.shopId = body.shopId ? String(body.shopId) : null;
     }
+    if (body.canManageInventory !== undefined) {
+      // Owner-only: only the SHOP_OWNER can grant/revoke inventory access for
+      // own-shop STAFF. SUPER_ADMIN never touches shop stock permissions.
+      // Only meaningful for STAFF (owners always have access).
+      if ((target as any).role !== "STAFF") return c.json({ error: "canManageInventory applies to STAFF only" }, 400);
+      if (actor.role !== "SHOP_OWNER") return c.json({ error: "Only the shop owner can change inventory access" }, 403);
+      if ((target as any).shopId !== actor.shopId) return c.json({ error: "Forbidden" }, 403);
+      data.canManageInventory = Boolean(body.canManageInventory);
+    }
 
     if (Object.keys(data).length === 0) return c.json({ error: "No valid fields" }, 400);
-    const updated = await prisma.user.update({ where: { id }, data, select: { id: true, shopId: true, email: true, name: true, role: true, isActive: true, createdAt: true } });
+    const updated = await prisma.user.update({ where: { id }, data, select: { id: true, shopId: true, email: true, name: true, role: true, canManageInventory: true, isActive: true, createdAt: true } });
     return c.json({ user: updated });
   } catch (e) {
     return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);
@@ -179,7 +206,7 @@ users.post("/:id/restore", requireRole("SUPER_ADMIN", "SHOP_OWNER") as any, asyn
     if (!target) return c.json({ error: "Not found" }, 404);
     if (!(target as any).deletedAt) return c.json({ message: "Already active", user: target });
     if (actor.role === "SHOP_OWNER" && (target as any).shopId !== actor.shopId) return c.json({ error: "Forbidden" }, 403);
-    const updated = await prisma.user.update({ where: { id }, data: { deletedAt: null, isActive: true }, select: { id: true, shopId: true, email: true, name: true, role: true, isActive: true } });
+    const updated = await prisma.user.update({ where: { id }, data: { deletedAt: null, isActive: true }, select: { id: true, shopId: true, email: true, name: true, role: true, canManageInventory: true, isActive: true } });
     return c.json({ user: updated });
   } catch (e) {
     return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);

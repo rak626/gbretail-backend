@@ -49,6 +49,9 @@ model User {
   passwordHash String
   name         String
   role         String    // SUPER_ADMIN | SHOP_OWNER | STAFF
+  // Owner-granted permission: STAFF with this flag can open + edit inventory.
+  // SHOP_OWNER always has full access; SUPER_ADMIN never touches shop inventory.
+  canManageInventory Boolean @default(false)
   isActive     Boolean   @default(true)
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt

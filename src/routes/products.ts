@@ -7,6 +7,19 @@ const products = new Hono();
 
 products.use("*", requireAuth as any);
 
+// STAFF can only mutate inventory when the owner granted canManageInventory.
+// Checked fresh from DB (not the token) so owner revoke/grant applies immediately.
+async function staffInventoryDenied(c: unknown): Promise<boolean> {
+  const user = ((c as any).get("user" as any) as any) || {};
+  if (!user || user.role !== "STAFF") return false;
+  try {
+    const row = await prisma.user.findUnique({ where: { id: user.userId }, select: { canManageInventory: true } as any });
+    return !(row as any)?.canManageInventory;
+  } catch {
+    return true;
+  }
+}
+
 // GET /api/products?search&category&limit&shopId
 products.get("/", async (c) => {
   const search = (c.req.query("search") ?? "").toLowerCase();
@@ -81,6 +94,7 @@ products.get("/:id", async (c) => {
 // POST /api/products
 products.post("/", async (c) => {
   try {
+    if (await staffInventoryDenied(c)) return c.json({ error: "Forbidden — inventory access not granted by owner" }, 403);
     const user = (c as any).get("user" as any) as any;
     const body = await c.req.json();
     let shopId: string | null = ((c as any).get("shopId" as any) as string | null) || user?.shopId || null;
@@ -174,6 +188,7 @@ products.patch("/:id", async (c) => {
   const user = (c as any).get("user" as any) as any;
   const shopId = ((c as any).get("shopId" as any) as string | null) || user?.shopId || null;
   try {
+    if (await staffInventoryDenied(c)) return c.json({ error: "Forbidden — inventory access not granted by owner" }, 403);
     const existing = await prisma.product.findUnique({ where: { id } });
     if (!existing || (existing as any).deletedAt) return c.json({ error: "Not found" }, 404);
     if (shopId && (existing as any).shopId && (existing as any).shopId !== shopId && user.role !== "SUPER_ADMIN") {
@@ -233,6 +248,7 @@ products.delete("/:id", async (c) => {
   const user = (c as any).get("user" as any) as any;
   const shopId = ((c as any).get("shopId" as any) as string | null) || user?.shopId || null;
   try {
+    if (await staffInventoryDenied(c)) return c.json({ error: "Forbidden — inventory access not granted by owner" }, 403);
     const existing = await prisma.product.findUnique({ where: { id } });
     if (!existing) return c.json({ error: "Not found" }, 404);
     if ((existing as any).deletedAt) return c.json({ error: "Already deleted" }, 409);
@@ -253,6 +269,7 @@ products.post("/:id/restore", async (c) => {
   const user = (c as any).get("user" as any) as any;
   const shopId = ((c as any).get("shopId" as any) as string | null) || user?.shopId || null;
   try {
+    if (await staffInventoryDenied(c)) return c.json({ error: "Forbidden — inventory access not granted by owner" }, 403);
     const existing = await prisma.product.findUnique({ where: { id } });
     if (!existing) return c.json({ error: "Not found" }, 404);
     if (!(existing as any).deletedAt) return c.json({ product: existing, message: "Already active" });
