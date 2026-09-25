@@ -1,5 +1,8 @@
 import { Hono } from "hono";
 import { prisma } from "../lib/prisma.js";
+import { normalizePhone, normalizeEmail } from "../lib/normalize.js";
+import { toAppError } from "../lib/errors.js";
+import { startOfDay } from "../lib/utils.js";
 
 const customers = new Hono();
 
@@ -87,7 +90,8 @@ customers.get("/", async (c) => {
       },
     });
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Error", customers: [], total: 0, page: 1, limit }, 500);
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code, customers: [], total: 0, page: 1, limit }, appErr.status as 500 | 503);
   }
 });
 
@@ -111,7 +115,8 @@ customers.get("/stats", async (c) => {
       topSpenders: topSpenderList,
     });
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed", total: 0 }, 500);
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code, total: 0 }, appErr.status as 500 | 503);
   }
 });
 
@@ -223,7 +228,8 @@ customers.get("/:id", async (c) => {
       },
     });
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Error" }, 500);
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 500 | 503);
   }
 });
 
@@ -233,9 +239,8 @@ customers.post("/", async (c) => {
     const body = await c.req.json();
     const { name, phone, balance, email, address, notes, creditLimit } = body;
     const trimmedName = String(name ?? "").trim();
-    const trimmedPhoneRaw = phone ? String(phone).trim().replace(/\D/g, "").slice(0, 10) : "";
-    const trimmedPhone = trimmedPhoneRaw || null;
-    const trimmedEmail = email ? String(email).trim().slice(0, 120).toLowerCase() : null;
+    const trimmedPhone = normalizePhone(phone);
+    const trimmedEmail = normalizeEmail(email);
     const trimmedAddress = address ? String(address).trim().slice(0, 500) : null;
     const trimmedNotes = notes ? String(notes).trim().slice(0, 1000) : null;
     const parsedCreditLimit = creditLimit != null && String(creditLimit).trim() !== "" ? Number(creditLimit) : null;
@@ -276,11 +281,8 @@ customers.post("/", async (c) => {
 
     return c.json({ customer }, 201);
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Failed to create customer";
-    if (msg.includes("DATABASE_URL") || msg.includes("connect")) {
-      return c.json({ error: "Database not configured" }, 503);
-    }
-    return c.json({ error: msg }, 500);
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 409 | 500 | 503);
   }
 });
 
@@ -306,16 +308,16 @@ customers.patch("/:id", async (c) => {
       allowed.name = n;
     }
     if (body.phone !== undefined) {
-      const raw = body.phone == null || String(body.phone).trim() === "" ? null : String(body.phone).trim().replace(/\D/g, "").slice(0, 10);
+      const raw = normalizePhone(body.phone);
       if (raw && !/^\d{10}$/.test(raw)) return c.json({ error: "Invalid phone" }, 400);
       if (raw) {
         const dup = await prisma.customer.findUnique({ where: { phone: raw } });
-        if (dup && dup.id !== id && !(dup as any).deletedAt) return c.json({ error: "Phone already used by another customer", customer: dup }, 409);
+        if (dup && dup.id !== id && !(dup as { deletedAt?: Date | null }).deletedAt) return c.json({ error: "Phone already used by another customer", customer: dup }, 409);
       }
       allowed.phone = raw;
     }
     if (body.email !== undefined) {
-      const e = body.email == null || String(body.email).trim() === "" ? null : String(body.email).trim().slice(0, 120).toLowerCase();
+      const e = normalizeEmail(body.email);
       if (e && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) return c.json({ error: "Invalid email" }, 400);
       allowed.email = e;
     }
@@ -350,7 +352,8 @@ customers.patch("/:id", async (c) => {
     const customer = await prisma.customer.update({ where: { id }, data: allowed });
     return c.json({ customer });
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Error" }, 500);
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 500 | 503);
   }
 });
 
@@ -360,11 +363,12 @@ customers.delete("/:id", async (c) => {
   try {
     const existing = await prisma.customer.findUnique({ where: { id } });
     if (!existing) return c.json({ error: "Not found" }, 404);
-    if ((existing as any).deletedAt) return c.json({ error: "Already deleted", customer: existing }, 409);
+    if ((existing as { deletedAt?: Date | null }).deletedAt) return c.json({ error: "Already deleted", customer: existing }, 409);
     const customer = await prisma.customer.update({ where: { id }, data: { deletedAt: new Date() } });
     return c.json({ customer, softDeleted: true });
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed to delete" }, 500);
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 500 | 503);
   }
 });
 
@@ -374,11 +378,12 @@ customers.post("/:id/restore", async (c) => {
   try {
     const existing = await prisma.customer.findUnique({ where: { id } });
     if (!existing) return c.json({ error: "Not found" }, 404);
-    if (!(existing as any).deletedAt) return c.json({ customer: existing, message: "Already active" });
+    if (!(existing as { deletedAt?: Date | null }).deletedAt) return c.json({ customer: existing, message: "Already active" });
     const customer = await prisma.customer.update({ where: { id }, data: { deletedAt: null } });
     return c.json({ customer });
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 500 | 503);
   }
 });
 

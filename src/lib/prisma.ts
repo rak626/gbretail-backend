@@ -1,9 +1,9 @@
-import "dotenv/config";
 import { PrismaClient } from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaNeon } from "@prisma/adapter-neon";
 import { neonConfig } from "@neondatabase/serverless";
 import ws from "ws";
+import { config } from "../config.js";
 
 // Edge-aware Prisma singleton
 // - Local Node (default): PrismaPg + pg TCP
@@ -15,7 +15,7 @@ const globalForPrisma = globalThis as unknown as {
 };
 
 function createPrismaClient() {
-  const connectionString = process.env.DATABASE_URL;
+  const connectionString = config.databaseUrl;
 
   if (!connectionString) {
     console.warn("[prisma] DATABASE_URL not set - using dummy adapter (queries will fail gracefully)");
@@ -23,30 +23,30 @@ function createPrismaClient() {
     const dummy = new PrismaPg({ connectionString: "postgresql://dummy:dummy@localhost:5432/dummy?schema=public" });
     return new PrismaClient({
       adapter: dummy,
-      log: process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
+      log: config.nodeEnv === "development" ? ["error", "warn"] : ["error"],
     });
   }
 
   // Prisma Accelerate (prisma://) — no adapter
   if (connectionString.startsWith("prisma://")) {
     return new PrismaClient({
-      log: process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
+      log: config.nodeEnv === "development" ? ["error", "warn"] : ["error"],
     });
   }
 
-  // Neon HTTP for edge (fetch) — auto if USE_NEON=1 or URL contains neon.tech
-  const useNeon = process.env.USE_NEON === "1" || connectionString.includes("neon.tech");
+  // Neon HTTP for edge (fetch) — auto if USE_NEON=1 or URL contains neon.tech (case-insensitive)
+  const useNeon = config.useNeon || connectionString.toLowerCase().includes("neon.tech");
   if (useNeon) {
     // ws required for node local; Workers use fetch — both set
     try {
-      neonConfig.webSocketConstructor = ws;
+      neonConfig.webSocketConstructor = ws as unknown as typeof WebSocket;
     } catch {
       // ignore in Workers where ws unavailable — fetch path used
     }
     const adapter = new PrismaNeon({ connectionString });
     return new PrismaClient({
       adapter,
-      log: process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
+      log: config.nodeEnv === "development" ? ["error", "warn"] : ["error"],
     });
   }
 
@@ -54,12 +54,12 @@ function createPrismaClient() {
   const adapter = new PrismaPg({ connectionString });
   return new PrismaClient({
     adapter,
-    log: process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
+    log: config.nodeEnv === "development" ? ["error", "warn"] : ["error"],
   });
 }
 
 export const prisma = globalForPrisma.prisma ?? createPrismaClient();
 
-if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
+if (config.nodeEnv !== "production") globalForPrisma.prisma = prisma;
 
 export default prisma;

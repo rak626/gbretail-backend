@@ -1,6 +1,8 @@
 import { Hono } from "hono";
 import { prisma } from "../lib/prisma.js";
-import { addDays, endOfDay, startOfDay } from "../lib/utils.js";
+import { addDays, endOfDay, startOfDay, computeDueDate } from "../lib/utils.js";
+import { normalizePhone, parseCreditDays, normalizeCreditTerm } from "../lib/normalize.js";
+import { toAppError } from "../lib/errors.js";
 
 const ledger = new Hono();
 
@@ -147,26 +149,21 @@ ledger.post("/", async (c) => {
       return c.json({ error: "Valid amount required (>0)" }, 400);
     }
 
-    let days = Number(creditDays ?? customDays);
-    if (isNaN(days) || days <= 0) {
-      const cd = Number(customDays);
-      if (!isNaN(cd) && cd > 0) days = cd;
-      else if (body.creditTerm === 7 || body.creditTerm === 15 || body.creditTerm === 30) days = Number(body.creditTerm);
-      else days = 30;
-    }
-    days = Math.round(days);
-    if (days < 1 || days > 365) return c.json({ error: "creditDays must be between 1 and 365" }, 400);
+    const days = parseCreditDays(creditDays ?? customDays ?? (body as Record<string, unknown>).creditTerm ?? 30);
+    // Alternative term branch already handled via parseCreditDays; keep backward compat
+    const effectiveDays = normalizeCreditTerm(body as Record<string, unknown>, days);
 
     let resolvedCustomerId = customerId ? String(customerId) : null;
 
     if (!resolvedCustomerId) {
       const name = customerName ? String(customerName).trim() : "";
-      const phoneRaw = customerPhone ? String(customerPhone).trim().replace(/\D/g, "").slice(0, 10) : "";
-      const phone = phoneRaw && /^\d{10}$/.test(phoneRaw) ? phoneRaw : null;
+      const phone = normalizePhone(customerPhone);
 
       if (!name && !phone) {
         return c.json({ error: "Customer name or phone required" }, 400);
       }
+
+      if (phone && !/^\d{10}$/.test(phone)) return c.json({ error: "Invalid phone — must be 10 digits" }, 400);
 
       if (phone) {
         const existing = await prisma.customer.findUnique({ where: { phone } });
@@ -196,43 +193,41 @@ ledger.post("/", async (c) => {
       if (!exists) return c.json({ error: "Customer not found" }, 404);
     }
 
-    const now = new Date();
-    const dueDate = addDays(startOfDay(now), days);
-    const dueDateNormalized = startOfDay(dueDate);
-
     const orderRef = orderId ? String(orderId) : null;
     if (orderRef) {
       const o = await prisma.order.findUnique({ where: { id: orderRef } });
       if (!o) return c.json({ error: "Order not found for orderId" }, 404);
     }
 
-    const entry = await prisma.ledgerEntry.create({
-      data: {
-        customerId: resolvedCustomerId!,
-        orderId: orderRef,
-        amount: parsedAmount,
-        creditDays: days,
-        dueDate: dueDateNormalized,
-        status: "pending",
-        note: note ? String(note).trim().slice(0, 300) : null,
-      },
-      include: { customer: { select: { id: true, name: true, phone: true, balance: true } }, order: { select: { id: true, orderNumber: true } } },
-    });
+    const dueDateNormalized = computeDueDate(effectiveDays);
 
-    await prisma.customer.update({
-      where: { id: resolvedCustomerId! },
-      data: { balance: { increment: parsedAmount } },
+    // Transaction: ledger + balance increment
+    const entry = await prisma.$transaction(async (tx) => {
+      const e = await tx.ledgerEntry.create({
+        data: {
+          customerId: resolvedCustomerId!,
+          orderId: orderRef,
+          amount: parsedAmount,
+          creditDays: effectiveDays,
+          dueDate: dueDateNormalized,
+          status: "pending",
+          note: note ? String(note).trim().slice(0, 300) : null,
+        },
+        include: { customer: { select: { id: true, name: true, phone: true, balance: true } }, order: { select: { id: true, orderNumber: true } } },
+      });
+      await tx.customer.update({
+        where: { id: resolvedCustomerId! },
+        data: { balance: { increment: parsedAmount } },
+      });
+      return e;
     });
 
     const updatedCustomer = await prisma.customer.findUnique({ where: { id: resolvedCustomerId! }, select: { id: true, name: true, phone: true, balance: true } });
 
     return c.json({ entry: { ...entry, customer: updatedCustomer } }, 201);
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Failed to create ledger entry";
-    if (msg.includes("DATABASE_URL") || msg.includes("connect")) {
-      return c.json({ error: "Database not configured" }, 503);
-    }
-    return c.json({ error: msg }, 500);
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 404 | 409 | 500 | 503);
   }
 });
 
@@ -265,38 +260,41 @@ ledger.patch("/:id", async (c) => {
       if (entry.status === "settled") {
         return c.json({ entry, message: "Already settled" });
       }
-      const updated = await prisma.ledgerEntry.update({
-        where: { id },
-        data: { status: "settled", settledAt: new Date() },
-        include: { customer: { select: { id: true, name: true, phone: true, balance: true } }, order: { select: { id: true, orderNumber: true } } },
+      const result = await prisma.$transaction(async (tx) => {
+        const updated = await tx.ledgerEntry.update({
+          where: { id },
+          data: { status: "settled", settledAt: new Date() },
+          include: { customer: { select: { id: true, name: true, phone: true, balance: true } }, order: { select: { id: true, orderNumber: true } } },
+        });
+        await tx.customer.update({
+          where: { id: entry.customerId },
+          data: { balance: { decrement: entry.amount } },
+        });
+        const cust = await tx.customer.findUnique({ where: { id: entry.customerId } });
+        if (cust && cust.balance < 0) {
+          await tx.customer.update({ where: { id: cust.id }, data: { balance: 0 } });
+        }
+        const finalCustomer = await tx.customer.findUnique({ where: { id: entry.customerId }, select: { id: true, name: true, phone: true, balance: true } });
+        return { updated, finalCustomer };
       });
-
-      await prisma.customer.update({
-        where: { id: entry.customerId },
-        data: { balance: { decrement: entry.amount } },
-      });
-
-      const cust = await prisma.customer.findUnique({ where: { id: entry.customerId } });
-      if (cust && cust.balance < 0) {
-        await prisma.customer.update({ where: { id: cust.id }, data: { balance: 0 } });
-      }
-
-      const finalCustomer = await prisma.customer.findUnique({ where: { id: entry.customerId }, select: { id: true, name: true, phone: true, balance: true } });
-      return c.json({ entry: { ...updated, customer: finalCustomer } });
+      return c.json({ entry: { ...result.updated, customer: result.finalCustomer } });
     }
 
     if (action === "reopen" || action === "undo") {
       if (entry.status !== "settled") {
         return c.json({ error: "Only settled entries can be reopened" }, 400);
       }
-      const updated = await prisma.ledgerEntry.update({
-        where: { id },
-        data: { status: "pending", settledAt: null },
-        include: { customer: { select: { id: true, name: true, phone: true, balance: true } } },
+      const result = await prisma.$transaction(async (tx) => {
+        const updated = await tx.ledgerEntry.update({
+          where: { id },
+          data: { status: "pending", settledAt: null },
+          include: { customer: { select: { id: true, name: true, phone: true, balance: true } } },
+        });
+        await tx.customer.update({ where: { id: entry.customerId }, data: { balance: { increment: entry.amount } } });
+        const finalCustomer = await tx.customer.findUnique({ where: { id: entry.customerId }, select: { id: true, name: true, phone: true, balance: true } });
+        return { updated, finalCustomer };
       });
-      await prisma.customer.update({ where: { id: entry.customerId }, data: { balance: { increment: entry.amount } } });
-      const finalCustomer = await prisma.customer.findUnique({ where: { id: entry.customerId }, select: { id: true, name: true, phone: true, balance: true } });
-      return c.json({ entry: { ...updated, customer: finalCustomer } });
+      return c.json({ entry: { ...result.updated, customer: result.finalCustomer } });
     }
 
     return c.json({ error: "Unknown action. Use settle or reopen" }, 400);
@@ -305,21 +303,24 @@ ledger.patch("/:id", async (c) => {
   }
 });
 
-// DELETE /api/ledger/:id
+// DELETE /api/ledger/:id — transactional to keep balance consistent
 ledger.delete("/:id", async (c) => {
   const id = c.req.param("id");
   try {
     const entry = await prisma.ledgerEntry.findUnique({ where: { id } });
     if (!entry) return c.json({ error: "Not found" }, 404);
-    if (entry.status === "pending") {
-      await prisma.customer.update({ where: { id: entry.customerId }, data: { balance: { decrement: entry.amount } } });
-      const cust = await prisma.customer.findUnique({ where: { id: entry.customerId } });
-      if (cust && cust.balance < 0) await prisma.customer.update({ where: { id: cust.id }, data: { balance: 0 } });
-    }
-    await prisma.ledgerEntry.delete({ where: { id } });
+    await prisma.$transaction(async (tx) => {
+      if (entry.status === "pending") {
+        await tx.customer.update({ where: { id: entry.customerId }, data: { balance: { decrement: entry.amount } } });
+        const cust = await tx.customer.findUnique({ where: { id: entry.customerId } });
+        if (cust && cust.balance < 0) await tx.customer.update({ where: { id: cust.id }, data: { balance: 0 } });
+      }
+      await tx.ledgerEntry.delete({ where: { id } });
+    });
     return c.json({ success: true });
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 404 | 500 | 503);
   }
 });
 

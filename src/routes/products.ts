@@ -126,23 +126,44 @@ products.post("/", async (c) => {
   }
 });
 
-// PATCH /api/products/:id
+// PATCH /api/products/:id — whitelist to prevent mutating id/createdAt/deletedAt
 products.patch("/:id", async (c) => {
   const id = c.req.param("id");
   try {
     const body = await c.req.json();
-    if (body.costPrice != null) {
-      const cp = Number(body.costPrice);
+    const allowed: Record<string, unknown> = {};
+    const fields = ["name", "is_loose", "rate_per_kg", "barcode", "price", "costPrice", "unit", "category", "preset_weights", "preset_prices", "stockQuantity"] as const;
+    for (const k of fields) if (k in body) allowed[k] = (body as Record<string, unknown>)[k];
+
+    if (allowed.costPrice != null) {
+      const cp = Number(allowed.costPrice);
       if (isNaN(cp) || cp < 0) return c.json({ error: "costPrice must be >=0" }, 400);
-      body.costPrice = cp;
+      allowed.costPrice = cp;
     }
-    if (body.price != null) body.price = Number(body.price);
-    if (body.rate_per_kg != null) body.rate_per_kg = Number(body.rate_per_kg);
-    if (body.stockQuantity != null) body.stockQuantity = Number(body.stockQuantity);
-    const product = await prisma.product.update({ where: { id }, data: body });
+    if (allowed.price != null) allowed.price = Number(allowed.price as number);
+    if (allowed.rate_per_kg != null) allowed.rate_per_kg = Number(allowed.rate_per_kg as number);
+    if (allowed.stockQuantity != null) allowed.stockQuantity = Number(allowed.stockQuantity as number);
+    if (allowed.name != null) allowed.name = String(allowed.name).trim();
+    if (allowed.category != null) allowed.category = String(allowed.category);
+    if (allowed.barcode != null) allowed.barcode = allowed.barcode ? String(allowed.barcode).trim() : null;
+    if (allowed.unit != null) allowed.unit = String(allowed.unit);
+    if (allowed.preset_weights != null) allowed.preset_weights = Array.isArray(allowed.preset_weights) ? (allowed.preset_weights as unknown[]).map(Number) : [];
+    if (allowed.preset_prices != null) allowed.preset_prices = Array.isArray(allowed.preset_prices) ? (allowed.preset_prices as unknown[]).map(Number) : [];
+
+    if (Object.keys(allowed).length === 0) return c.json({ error: "No valid fields to update" }, 400);
+
+    // Barcode uniqueness guard
+    if (allowed.barcode) {
+      const dup = await prisma.product.findUnique({ where: { barcode: String(allowed.barcode) } });
+      if (dup && dup.id !== id) return c.json({ error: "Barcode already exists" }, 409);
+    }
+
+    const product = await prisma.product.update({ where: { id }, data: allowed });
     return c.json({ product });
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Error" }, 500);
+    const { toAppError } = await import("../lib/errors.js");
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 404 | 409 | 500 | 503);
   }
 });
 

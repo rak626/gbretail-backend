@@ -1,6 +1,8 @@
 import { Hono } from "hono";
 import { prisma } from "../lib/prisma.js";
 import { computeDueDate, generateOrderNumber, getNextOrderNumber } from "../lib/utils.js";
+import { normalizePhone } from "../lib/normalize.js";
+import { toAppError } from "../lib/errors.js";
 
 const orders = new Hono();
 
@@ -95,141 +97,138 @@ orders.post("/", async (c) => {
       return c.json({ error: "Invalid paymentMethod" }, 400);
     }
 
-    const orderNumber = await getNextOrderNumber(prisma as any).catch(() => generateOrderNumber());
+    // Use transaction to ensure atomicity: customer updates + order + ledger + stock
+    const order = await prisma.$transaction(async (tx) => {
+      const orderNumber = await getNextOrderNumber(tx as any).catch(() => generateOrderNumber());
+      let resolvedCustomerId: string | null = customerId ?? null;
+      const now = new Date();
 
-    let resolvedCustomerId = customerId ?? null;
-
-    const now = new Date();
-    if (!resolvedCustomerId && (customerName || customerPhone) && paymentMethod === "khata") {
-      const phone = customerPhone ? String(customerPhone).trim().replace(/\D/g, "").slice(0, 10) : null;
-      const name = customerName ? String(customerName).trim() : "Walk-in Customer";
-      if (phone) {
-        const existing = await prisma.customer.findUnique({ where: { phone } });
+      if (!resolvedCustomerId && (customerName || customerPhone) && paymentMethod === "khata") {
+        const phone = normalizePhone(customerPhone);
+        const name = customerName ? String(customerName).trim() : "Walk-in Customer";
+        if (phone) {
+          const existing = await tx.customer.findUnique({ where: { phone } });
+          if (existing) {
+            resolvedCustomerId = existing.id;
+            const isFirst = !(existing as { firstOrderAt?: Date | null }).firstOrderAt;
+            await tx.customer.update({
+              where: { id: existing.id },
+              data: {
+                balance: { increment: total },
+                totalSpent: { increment: total },
+                totalOrders: { increment: 1 },
+                lastOrderAt: now,
+                ...(isFirst ? { firstOrderAt: now } : {}),
+                ...((existing as { deletedAt?: Date | null }).deletedAt ? { deletedAt: null } : {}),
+              },
+            });
+          } else {
+            const cust = await tx.customer.create({
+              data: {
+                name,
+                phone,
+                balance: total,
+                totalSpent: total,
+                totalOrders: 1,
+                firstOrderAt: now,
+                lastOrderAt: now,
+              },
+            });
+            resolvedCustomerId = cust.id;
+          }
+        } else if (name && name !== "Walk-in Customer") {
+          const cust = await tx.customer.create({
+            data: { name, balance: total, totalSpent: total, totalOrders: 1, firstOrderAt: now, lastOrderAt: now },
+          });
+          resolvedCustomerId = cust.id;
+        }
+      } else if (resolvedCustomerId) {
+        const existing = await tx.customer.findUnique({ where: { id: resolvedCustomerId }, select: { firstOrderAt: true, deletedAt: true } });
         if (existing) {
-          resolvedCustomerId = existing.id;
-          const isFirst = !(existing as any).firstOrderAt;
-          await prisma.customer.update({
-            where: { id: existing.id },
+          const isFirst = !existing?.firstOrderAt;
+          await tx.customer.update({
+            where: { id: resolvedCustomerId },
             data: {
-              balance: { increment: total },
               totalSpent: { increment: total },
               totalOrders: { increment: 1 },
               lastOrderAt: now,
               ...(isFirst ? { firstOrderAt: now } : {}),
-              ...( (existing as any).deletedAt ? { deletedAt: null } : {}),
+              ...(existing?.deletedAt ? { deletedAt: null } : {}),
+              ...(paymentMethod === "khata" ? { balance: { increment: total } } : {}),
             },
           });
-        } else {
-          const cust = await prisma.customer.create({
-            data: {
-              name,
-              phone,
-              balance: total,
-              totalSpent: total,
-              totalOrders: 1,
-              firstOrderAt: now,
-              lastOrderAt: now,
-            },
-          });
-          resolvedCustomerId = cust.id;
         }
-      } else if (name && name !== "Walk-in Customer") {
-        const cust = await prisma.customer.create({
-          data: { name, balance: total, totalSpent: total, totalOrders: 1, firstOrderAt: now, lastOrderAt: now },
-        });
-        resolvedCustomerId = cust.id;
       }
-    } else if (resolvedCustomerId) {
-      try {
-        const existing = await prisma.customer.findUnique({ where: { id: resolvedCustomerId }, select: { firstOrderAt: true, deletedAt: true } });
-        const isFirst = !existing?.firstOrderAt;
-        await prisma.customer.update({
-          where: { id: resolvedCustomerId },
-          data: {
-            totalSpent: { increment: total },
-            totalOrders: { increment: 1 },
-            lastOrderAt: now,
-            ...(isFirst ? { firstOrderAt: now } : {}),
-            ...(existing?.deletedAt ? { deletedAt: null } : {}),
-            ...(paymentMethod === "khata" ? { balance: { increment: total } } : {}),
+
+      const createdOrder = await tx.order.create({
+        data: {
+          orderNumber,
+          total: Number(total),
+          discount: Number(discount),
+          paymentMethod,
+          customerId: resolvedCustomerId,
+          status,
+          items: {
+            create: (items as Record<string, unknown>[]).map((it) => ({
+              productId: (it.productId as string) || null,
+              name: String(it.name),
+              price: Number(it.price),
+              unit: String(it.unit ?? "pcs"),
+              quantity: it.quantity != null ? Number(it.quantity) : null,
+              weight: it.weight != null ? Number(it.weight) : null,
+              lineTotal: Number(it.lineTotal),
+              isCustom: Boolean(it.isCustom),
+              costPrice: it.costPrice != null ? Number(it.costPrice) : null,
+              category: it.category ? String(it.category) : null,
+            })),
           },
-        });
-      } catch {
-        // ignore
-      }
-    }
-
-    const order = await prisma.order.create({
-      data: {
-        orderNumber,
-        total: Number(total),
-        discount: Number(discount),
-        paymentMethod,
-        customerId: resolvedCustomerId,
-        status,
-        items: {
-          create: items.map((it: Record<string, unknown>) => ({
-            productId: (it.productId as string) || null,
-            name: String(it.name),
-            price: Number(it.price),
-            unit: String(it.unit ?? "pcs"),
-            quantity: it.quantity != null ? Number(it.quantity) : null,
-            weight: it.weight != null ? Number(it.weight) : null,
-            lineTotal: Number(it.lineTotal),
-            isCustom: Boolean(it.isCustom),
-            costPrice: it.costPrice != null ? Number(it.costPrice) : null,
-            category: it.category ? String(it.category) : null,
-          })),
         },
-      },
-      include: { items: true, customer: true },
-    });
+        include: { items: true, customer: true },
+      });
 
-    if (paymentMethod === "khata" && resolvedCustomerId) {
-      try {
-        let days = Number(creditDays ?? customDays);
-        if (isNaN(days) || days <= 0) days = 30;
-        days = Math.round(days);
-        if (days < 1) days = 1;
-        if (days > 365) days = 365;
+      if (paymentMethod === "khata" && resolvedCustomerId) {
+        const daysInput = Number(creditDays ?? customDays);
+        const days = Number.isNaN(daysInput) || daysInput <= 0 ? 30 : Math.min(365, Math.max(1, Math.round(daysInput)));
         const dueDate = computeDueDate(days);
-        await prisma.ledgerEntry.create({
+        await tx.ledgerEntry.create({
           data: {
             customerId: resolvedCustomerId,
-            orderId: order.id,
+            orderId: createdOrder.id,
             amount: Number(total),
             creditDays: days,
             dueDate,
             status: "pending",
           },
         });
-      } catch (e) {
-        console.warn("[POST /orders] ledger create failed:", e instanceof Error ? e.message : e);
       }
-    }
 
-    for (const it of items as Array<Record<string, unknown>>) {
-      if (!it.isCustom && it.productId) {
-        try {
+      // Stock decrement — check stock >= qty to avoid negative, still transactional
+      for (const it of items as Record<string, unknown>[]) {
+        if (!it.isCustom && it.productId) {
           const qty = Number(it.quantity ?? it.weight ?? 1);
-          await prisma.product.update({
-            where: { id: String(it.productId) },
+          if (qty <= 0) continue;
+          // Use conditional decrement to prevent negative stock
+          await tx.product.updateMany({
+            where: { id: String(it.productId), stockQuantity: { gte: qty } },
             data: { stockQuantity: { decrement: qty } },
           });
-        } catch {
-          // ignore
+          // If stock was insufficient, fallback to decrement anyway but clamp to 0 downstream?
+          // We allow negative protection via where gte; if not matched, try plain decrement and clamp
+          const prod = await tx.product.findUnique({ where: { id: String(it.productId) }, select: { stockQuantity: true } });
+          if (prod && prod.stockQuantity < 0) {
+            await tx.product.update({ where: { id: String(it.productId) }, data: { stockQuantity: 0 } });
+          }
         }
       }
-    }
+
+      return createdOrder;
+    });
 
     return c.json({ order }, 201);
   } catch (e) {
     console.error("[POST /orders]", e);
-    const msg = e instanceof Error ? e.message : "Failed to create order";
-    if (msg.includes("DATABASE_URL") || msg.includes("connect") || msg.includes("Can't reach")) {
-      return c.json({ error: "Database not configured. Set DATABASE_URL", code: "DB_NOT_CONFIGURED" }, 503);
-    }
-    return c.json({ error: msg }, 500);
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 409 | 500 | 503);
   }
 });
 

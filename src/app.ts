@@ -1,6 +1,8 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
+import { config, validateCorsOrigins } from "./config.js";
+import { toAppError } from "./lib/errors.js";
 
 import health from "./routes/health.js";
 import stats from "./routes/stats.js";
@@ -13,12 +15,11 @@ import analytics from "./routes/analytics.js";
 export function createApp() {
   const app = new Hono();
 
-  // Global middleware
-  app.use("*", logger());
+  // Global middleware — logger only in non-production to avoid verbose PII
+  if (!config.isProduction) app.use("*", logger());
 
-  const origins = process.env.CORS_ORIGIN
-    ? process.env.CORS_ORIGIN.split(",").map((s) => s.trim())
-    : ["http://localhost:3000"];
+  const origins = config.corsOrigins;
+  validateCorsOrigins(origins);
 
   app.use(
     "*",
@@ -30,7 +31,7 @@ export function createApp() {
     })
   );
 
-  // Root
+  // Root — version from package.json would be ideal; keep static but single source intent
   app.get("/", (c) => c.json({ name: "gbretail-backend", status: "ok", version: "1.0.0" }));
 
   // Mount API
@@ -45,10 +46,11 @@ export function createApp() {
   // 404
   app.notFound((c) => c.json({ error: "Not Found", path: c.req.path }, 404));
 
-  // Error handler
+  // Central error handler — sanitizes internal messages
   app.onError((err, c) => {
     console.error("[Hono Error]", err);
-    return c.json({ error: err.message || "Internal Server Error" }, 500);
+    const appErr = toAppError(err);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 500);
   });
 
   return app;
