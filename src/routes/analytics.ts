@@ -461,7 +461,21 @@ analytics.get("/sections", async (c) => {
           select: { id: true, name: true, phone: true, totalSpent: true, totalOrders: true, balance: true, firstOrderAt: true, createdAt: true, lastOrderAt: true },
         })
       : [];
-    const byId = new Map((scopedCustomers as any[]).map((x) => [x.id, x]));
+    // Per-shop spend: Customer.totalSpent/totalOrders are lifetime-global
+    // (one phone can buy in many shops), so aggregate this shop's orders.
+    // Dues (balance) stay global — money owed is money owed.
+    const perShopAgg = await prisma.order.groupBy({
+      by: ["customerId"],
+      where: { deletedAt: null, customerId: { not: null }, ...shopFilter } as any,
+      _sum: { total: true },
+      _count: { _all: true },
+    });
+    const shopSpend = new Map<string, { spent: number; orders: number }>(
+      perShopAgg.map((g) => [
+        g.customerId as string,
+        { spent: Number(Number((g._sum as any)?.total ?? 0).toFixed(2)), orders: (g._count as any)?._all ?? 0 },
+      ])
+    );
     const activeIds = Array.from(new Set(orders.map((o) => o.customerId).filter(Boolean))) as string[];
     const startMs = start.getTime();
     const endMs = end.getTime();
@@ -475,18 +489,18 @@ analytics.get("/sections", async (c) => {
       return !isNaN(t) && t >= startMs && t <= endMs;
     }).length;
     const activeCount = activeIds.length;
-    const repeatCount = activeIds.filter((id) => Number(byId.get(id)?.totalOrders ?? 0) > 1).length;
+    const repeatCount = activeIds.filter((id) => (shopSpend.get(id)?.orders ?? 0) > 1).length;
     const retentionPct = activeCount ? Number(((repeatCount / activeCount) * 100).toFixed(1)) : 0;
     const avgCustomerValue = activeCount ? Number((rangeRevenue / activeCount).toFixed(2)) : 0;
     const top = [...(scopedCustomers as any[])]
-      .sort((a, b) => Number(b.totalSpent ?? 0) - Number(a.totalSpent ?? 0))
+      .sort((a, b) => Number(shopSpend.get(b.id)?.spent ?? 0) - Number(shopSpend.get(a.id)?.spent ?? 0))
       .slice(0, 10)
-      .map((x) => ({ id: x.id, name: x.name, phone: x.phone, totalSpent: Number(Number(x.totalSpent ?? 0).toFixed(2)), totalOrders: x.totalOrders ?? 0, balance: Number(Number(x.balance ?? 0).toFixed(2)) }));
+      .map((x) => ({ id: x.id, name: x.name, phone: x.phone, totalSpent: shopSpend.get(x.id)?.spent ?? 0, totalOrders: shopSpend.get(x.id)?.orders ?? 0, balance: Number(Number(x.balance ?? 0).toFixed(2)) }));
     const defaulters = [...(scopedCustomers as any[])]
       .filter((x) => Number(x.balance ?? 0) > 0)
       .sort((a, b) => Number(b.balance ?? 0) - Number(a.balance ?? 0))
       .slice(0, 8)
-      .map((x) => ({ id: x.id, name: x.name, phone: x.phone, balance: Number(Number(x.balance ?? 0).toFixed(2)), totalOrders: x.totalOrders ?? 0 }));
+      .map((x) => ({ id: x.id, name: x.name, phone: x.phone, balance: Number(Number(x.balance ?? 0).toFixed(2)), totalOrders: shopSpend.get(x.id)?.orders ?? 0 }));
 
     // ---- Shops (super) or counters (shop-level) ----
     let shops: any[] | null = null;
