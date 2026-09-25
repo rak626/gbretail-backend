@@ -11,8 +11,11 @@ import {
   getLedgerAgingBucket,
   LEDGER_AGING_BUCKETS,
 } from "../lib/analytics.js";
+import { requireAuth } from "../middleware/auth.js";
 
 const analytics = new Hono();
+
+analytics.use("*", requireAuth as any);
 
 // Simple in-memory cache (30s)
 const cache = new Map<string, { ts: number; data: any }>();
@@ -43,6 +46,11 @@ analytics.get("/summary", async (c) => {
   const topN = Math.min(Math.max(parseInt(c.req.query("topN") ?? "10", 10) || 10, 1), 50);
   const categoryFilter = (c.req.query("category") ?? "All").trim();
 
+  const user = (c as any).get("user" as any) as any;
+  const shopId = ((c as any).get("shopId" as any) as string | null) || user?.shopId || c.req.query("shopId") || null;
+  if (!shopId && user.role !== "SUPER_ADMIN") return c.json({ error: "Shop not assigned" }, 403);
+  const shopFilter: Record<string, unknown> = shopId ? { shopId } : {};
+
   const ck = cacheKey(c);
   const cached = getCached(ck);
   if (cached) return c.json(cached);
@@ -52,10 +60,10 @@ analytics.get("/summary", async (c) => {
     const { start, end, granularity, label } = bounds;
     const prev = getPrevRange(bounds);
 
-    // Fetch orders in range + prev range for delta
+    // Fetch orders in range + prev range for delta — scoped to shop
     // Include items
-    const whereCurrent = { createdAt: { gte: start, lte: end } } as any;
-    const wherePrev = { createdAt: { gte: prev.start, lte: prev.end } } as any;
+    const whereCurrent = { createdAt: { gte: start, lte: end }, deletedAt: null, ...shopFilter } as any;
+    const wherePrev = { createdAt: { gte: prev.start, lte: prev.end }, deletedAt: null, ...shopFilter } as any;
 
     const [orders, prevOrders, ledgerCreated, ledgerSettled, ledgerPending] = await Promise.all([
       prisma.order.findMany({
@@ -68,15 +76,15 @@ analytics.get("/summary", async (c) => {
         select: { total: true, discount: true, items: { select: { price: true, costPrice: true, quantity: true, weight: true, lineTotal: true } } },
       }),
       prisma.ledgerEntry.findMany({
-        where: { createdAt: { gte: start, lte: end } },
+        where: { createdAt: { gte: start, lte: end }, deletedAt: null, ...shopFilter } as any,
         select: { amount: true, createdAt: true, status: true, dueDate: true },
       }),
       prisma.ledgerEntry.findMany({
-        where: { settledAt: { gte: start, lte: end }, status: "settled" },
+        where: { settledAt: { gte: start, lte: end }, status: "settled", deletedAt: null, ...shopFilter } as any,
         select: { amount: true, settledAt: true },
       }),
       prisma.ledgerEntry.findMany({
-        where: { status: "pending" },
+        where: { status: "pending", deletedAt: null, ...shopFilter } as any,
         select: { amount: true, dueDate: true, createdAt: true, customerId: true },
       }),
     ]);
@@ -270,9 +278,9 @@ analytics.get("/summary", async (c) => {
     // Instead fetch more: we already have ledgerSettled without createdAt; compute 0.
     let avgDaysToSettle: number | null = null;
     if (ledgerSettled.length > 0) {
-      // Re-query with createdAt for accurate
+      // Re-query with createdAt for accurate — shop scoped
       const withCreated = await prisma.ledgerEntry.findMany({
-        where: { settledAt: { gte: start, lte: end }, status: "settled" },
+        where: { settledAt: { gte: start, lte: end }, status: "settled", deletedAt: null, ...shopFilter } as any,
         select: { createdAt: true, settledAt: true },
       });
       if (withCreated.length) {
@@ -382,6 +390,10 @@ analytics.get("/export", async (c) => {
   const toRaw = c.req.query("to");
   const granularityRaw = c.req.query("granularity");
   const format = (c.req.query("format") ?? "csv").toLowerCase();
+  const user = (c as any).get("user" as any) as any;
+  const shopId = ((c as any).get("shopId" as any) as string | null) || user?.shopId || c.req.query("shopId") || null;
+  if (!shopId && user.role !== "SUPER_ADMIN") return c.json({ error: "Shop not assigned" }, 403);
+  const shopFilter: Record<string, unknown> = shopId ? { shopId } : {};
 
   try {
     const bounds = getRangeBounds(presetRaw, fromRaw, toRaw, granularityRaw);
@@ -391,12 +403,12 @@ analytics.get("/export", async (c) => {
     // For export we need flat CSV: section timeseries, top products, categories, ledger aging
     // Fetch orders
     const orders = await prisma.order.findMany({
-      where: { createdAt: { gte: start, lte: end } },
+      where: { createdAt: { gte: start, lte: end }, deletedAt: null, ...shopFilter } as any,
       include: { items: true },
       orderBy: { createdAt: "asc" },
     });
     const ledgerPending = await prisma.ledgerEntry.findMany({
-      where: { status: "pending" },
+      where: { status: "pending", deletedAt: null, ...shopFilter } as any,
       select: { amount: true, dueDate: true },
     });
 

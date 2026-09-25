@@ -37,7 +37,7 @@ export async function getNextOrderNumber(prisma: { order: { count: (a: unknown) 
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const count = await prisma.order.count({
-    where: { createdAt: { gte: today } },
+    where: { createdAt: { gte: today }, deletedAt: null } as any,
   });
   const yyyy = today.getFullYear();
   const mm = String(today.getMonth() + 1).padStart(2, "0");

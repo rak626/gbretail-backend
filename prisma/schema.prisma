@@ -6,8 +6,65 @@ datasource db {
   provider = "postgresql"
 }
 
+model Shop {
+  id        String    @id @default(cuid())
+  name      String
+  address   String?
+  isActive  Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+  counters  Counter[]
+  users     User[]
+  products  Product[]
+  orders    Order[]
+  ledgerEntries LedgerEntry[]
+
+  @@index([name])
+  @@index([deletedAt])
+}
+
+model Counter {
+  id        String    @id @default(cuid())
+  shopId    String
+  shop      Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  name      String
+  isActive  Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+  orders    Order[]
+  ledgerEntries LedgerEntry[]
+
+  @@unique([shopId, name])
+  @@index([shopId])
+  @@index([deletedAt])
+}
+
+model User {
+  id           String    @id @default(cuid())
+  shopId       String?
+  shop         Shop?     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  email        String    @unique
+  passwordHash String
+  name         String
+  role         String    // SUPER_ADMIN | SHOP_OWNER | STAFF
+  isActive     Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  deletedAt    DateTime?
+  orders       Order[]
+  ledgerEntries LedgerEntry[]
+
+  @@index([shopId])
+  @@index([role])
+  @@index([deletedAt])
+}
+
 model Product {
   id             String      @id @default(cuid())
+  shopId         String?
+  shop           Shop?       @relation(fields: [shopId], references: [id], onDelete: Cascade)
   name           String
   is_loose       Boolean     @default(false)
   rate_per_kg    Float?
@@ -19,12 +76,17 @@ model Product {
   preset_weights Float[]     @default([])
   preset_prices  Float[]     @default([])
   stockQuantity  Float       @default(0)
+  deletedAt      DateTime?
   createdAt      DateTime    @default(now())
   updatedAt      DateTime    @updatedAt
   orderItems     OrderItem[]
 
+  @@index([shopId])
+  @@index([shopId, category])
+  @@index([shopId, name])
   @@index([category])
   @@index([name])
+  @@index([deletedAt])
 }
 
 model Customer {
@@ -58,6 +120,12 @@ model Customer {
 model Order {
   id            String        @id @default(cuid())
   orderNumber   String        @unique
+  shopId        String?
+  shop          Shop?         @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  counterId     String?
+  counter       Counter?      @relation(fields: [counterId], references: [id], onDelete: SetNull)
+  userId        String?
+  user          User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
   items         OrderItem[]
   total         Float
   discount      Float         @default(0)
@@ -67,14 +135,20 @@ model Order {
   status        String        @default("completed")
   orderDate     DateTime      @default(now())
   syncedAt      DateTime?
+  deletedAt     DateTime?
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
   ledgerEntries LedgerEntry[]
 
+  @@index([shopId])
+  @@index([shopId, createdAt])
+  @@index([shopId, counterId])
+  @@index([shopId, userId])
   @@index([customerId])
   @@index([createdAt])
   @@index([paymentMethod])
   @@index([orderNumber])
+  @@index([deletedAt])
 }
 
 model OrderItem {
@@ -100,6 +174,12 @@ model OrderItem {
 
 model LedgerEntry {
   id         String    @id @default(cuid())
+  shopId     String?
+  shop       Shop?     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  counterId  String?
+  counter    Counter?  @relation(fields: [counterId], references: [id], onDelete: SetNull)
+  userId     String?
+  user       User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
   customerId String
   customer   Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
   orderId    String?
@@ -110,13 +190,19 @@ model LedgerEntry {
   status     String    @default("pending") // pending | settled | overdue (computed)
   note       String?
   settledAt  DateTime?
+  deletedAt  DateTime?
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
 
+  @@index([shopId])
+  @@index([shopId, status])
+  @@index([shopId, customerId])
+  @@index([shopId, dueDate])
   @@index([customerId])
   @@index([status])
   @@index([dueDate])
   @@index([createdAt])
   @@index([settledAt])
   @@index([orderId])
+  @@index([deletedAt])
 }

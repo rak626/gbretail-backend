@@ -3,13 +3,24 @@ import { prisma } from "../lib/prisma.js";
 import { addDays, endOfDay, startOfDay, computeDueDate } from "../lib/utils.js";
 import { normalizePhone, parseCreditDays, normalizeCreditTerm } from "../lib/normalize.js";
 import { toAppError } from "../lib/errors.js";
+import { requireAuth } from "../middleware/auth.js";
 
 const ledger = new Hono();
+
+ledger.use("*", requireAuth as any);
+
+function getShopScope(c: any) {
+  const user = (c as any).get("user") as any;
+  const shopId = ((c as any).get("shopId") as string | null) || user?.shopId || c.req.query("shopId") || null;
+  return { user, shopId };
+}
 
 // GET /api/ledger/due-today?q&includeOverdue  (must be before /:id)
 ledger.get("/due-today", async (c) => {
   const q = (c.req.query("q") ?? "").trim();
   const includeOverdue = c.req.query("includeOverdue") === "1" || c.req.query("overdue") === "1";
+  const { user, shopId } = getShopScope(c);
+  if (!shopId && user.role !== "SUPER_ADMIN") return c.json({ error: "Shop not assigned" }, 403);
 
   try {
     const todayStart = startOfDay(new Date());
@@ -17,7 +28,9 @@ ledger.get("/due-today", async (c) => {
 
     const where: Record<string, unknown> = {
       status: "pending" as const,
+      deletedAt: null,
     };
+    if (shopId) (where as any).shopId = shopId;
 
     if (includeOverdue) {
       (where as Record<string, unknown>).dueDate = { lte: todayEnd };
@@ -28,6 +41,7 @@ ledger.get("/due-today", async (c) => {
     if (q) {
       const customers = await prisma.customer.findMany({
         where: {
+          deletedAt: null,
           OR: [
             { name: { contains: q, mode: "insensitive" as const } },
             { phone: { contains: q } },
@@ -43,12 +57,12 @@ ledger.get("/due-today", async (c) => {
 
     const [entries, agg] = await Promise.all([
       prisma.ledgerEntry.findMany({
-        where,
-        include: { customer: { select: { id: true, name: true, phone: true, balance: true } }, order: { select: { id: true, orderNumber: true } } },
+        where: where as any,
+        include: { customer: { select: { id: true, name: true, phone: true, balance: true } }, order: { select: { id: true, orderNumber: true } }, shop: { select: { id: true, name: true } }, counter: { select: { id: true, name: true } } },
         orderBy: [{ dueDate: "asc" }, { createdAt: "desc" }],
         take: 100,
       }),
-      prisma.ledgerEntry.aggregate({ where, _count: { _all: true }, _sum: { amount: true } }),
+      prisma.ledgerEntry.aggregate({ where: where as any, _count: { _all: true }, _sum: { amount: true } }),
     ]);
 
     return c.json({ entries, total: agg._count._all, count: agg._count._all, amount: agg._sum.amount ?? 0 });
@@ -59,15 +73,20 @@ ledger.get("/due-today", async (c) => {
 
 // GET /api/ledger?filter&q&customerId&page&limit&due
 ledger.get("/", async (c) => {
-  const limit = Math.min(parseInt(c.req.query("limit") ?? "50", 10), 100);
-  const page = Math.max(parseInt(c.req.query("page") ?? "1", 10), 1);
+  const rawLimit = parseInt(c.req.query("limit") ?? "50", 10);
+  const limit = isNaN(rawLimit) ? 50 : Math.min(rawLimit, 100);
+  const rawPage = parseInt(c.req.query("page") ?? "1", 10);
+  const page = isNaN(rawPage) ? 1 : Math.max(rawPage, 1);
   const filter = (c.req.query("filter") ?? "all").toLowerCase();
   const q = (c.req.query("q") ?? "").trim();
   const customerId = c.req.query("customerId") ?? "";
   const dueToday = c.req.query("due") === "today" || filter === "duetoday" || filter === "due_today" || filter === "due-today";
+  const { user, shopId } = getShopScope(c);
+  if (!shopId && user.role !== "SUPER_ADMIN") return c.json({ error: "Shop not assigned" }, 403);
 
   try {
-    const where: Record<string, unknown> = {};
+    const where: Record<string, unknown> = { deletedAt: null };
+    if (shopId) (where as any).shopId = shopId;
 
     if (customerId) where.customerId = customerId;
 
@@ -88,6 +107,7 @@ ledger.get("/", async (c) => {
     if (q) {
       const customers = await prisma.customer.findMany({
         where: {
+          deletedAt: null,
           OR: [
             { name: { contains: q, mode: "insensitive" as const } },
             { phone: { contains: q } },
@@ -105,21 +125,22 @@ ledger.get("/", async (c) => {
 
     const [entries, total] = await Promise.all([
       prisma.ledgerEntry.findMany({
-        where,
-        include: { customer: { select: { id: true, name: true, phone: true, balance: true } }, order: { select: { id: true, orderNumber: true, total: true } } },
+        where: where as any,
+        include: { customer: { select: { id: true, name: true, phone: true, balance: true } }, order: { select: { id: true, orderNumber: true, total: true } }, shop: { select: { id: true, name: true } }, counter: { select: { id: true, name: true } } },
         orderBy: [{ dueDate: "asc" }, { createdAt: "desc" }],
         take: limit,
         skip: (page - 1) * limit,
       }),
-      prisma.ledgerEntry.count({ where }),
+      prisma.ledgerEntry.count({ where: where as any }),
     ]);
 
     const todayStart = startOfDay(new Date());
     const todayEnd = endOfDay(new Date());
+    const shopFilter: Record<string, unknown> = shopId ? { shopId } : {};
     const [dueTodayAgg, overdueAgg, pendingAgg] = await Promise.all([
-      prisma.ledgerEntry.aggregate({ where: { status: "pending", dueDate: { gte: todayStart, lte: todayEnd } }, _count: { _all: true }, _sum: { amount: true } }),
-      prisma.ledgerEntry.aggregate({ where: { status: "pending", dueDate: { lt: todayStart } }, _count: { _all: true }, _sum: { amount: true } }),
-      prisma.ledgerEntry.aggregate({ where: { status: "pending" }, _count: { _all: true }, _sum: { amount: true } }),
+      prisma.ledgerEntry.aggregate({ where: { status: "pending", deletedAt: null, dueDate: { gte: todayStart, lte: todayEnd }, ...shopFilter } as any, _count: { _all: true }, _sum: { amount: true } }),
+      prisma.ledgerEntry.aggregate({ where: { status: "pending", deletedAt: null, dueDate: { lt: todayStart }, ...shopFilter } as any, _count: { _all: true }, _sum: { amount: true } }),
+      prisma.ledgerEntry.aggregate({ where: { status: "pending", deletedAt: null, ...shopFilter } as any, _count: { _all: true }, _sum: { amount: true } }),
     ]);
 
     return c.json({
@@ -142,15 +163,36 @@ ledger.get("/", async (c) => {
 ledger.post("/", async (c) => {
   try {
     const body = await c.req.json();
+    const user = (c as any).get("user") as any;
+    let shopId: string | null = ((c as any).get("shopId") as string | null) || user?.shopId || c.req.query("shopId") || null;
+    if (body.shopId) shopId = String(body.shopId);
+    if (!shopId && user.role !== "SUPER_ADMIN") return c.json({ error: "Shop not assigned" }, 403);
+    if (user.role === "SUPER_ADMIN" && !shopId) return c.json({ error: "shopId required" }, 400);
+    if (shopId) {
+      const shop = await prisma.shop.findUnique({ where: { id: shopId } });
+      if (!shop || (shop as any).deletedAt) return c.json({ error: "Shop not found" }, 404);
+    }
+    let counterId: string | null = body.counterId ? String(body.counterId) : user?.counterId || null;
+    // validate counter belongs to shop if provided
+    if (counterId) {
+      const counter = await prisma.counter.findUnique({ where: { id: counterId } });
+      if (!counter || (counter as any).deletedAt || !(counter as any).isActive) return c.json({ error: "Counter not found or inactive" }, 404);
+      if ((counter as any).shopId !== shopId && user.role !== "SUPER_ADMIN") return c.json({ error: "Counter does not belong to shop" }, 403);
+    } else {
+      // auto-pick first counter if available
+      const first = await prisma.counter.findFirst({ where: { shopId: shopId!, deletedAt: null, isActive: true } });
+      if (first) counterId = first.id;
+    }
+
     const { customerId, customerName, customerPhone, amount, creditDays, customDays, note, orderId } = body;
 
     const parsedAmount = Number(amount);
     if (!parsedAmount || isNaN(parsedAmount) || parsedAmount <= 0) {
       return c.json({ error: "Valid amount required (>0)" }, 400);
     }
+    if (parsedAmount > 1000000) return c.json({ error: "Amount too large (max 10,00,000)" }, 400);
 
     const days = parseCreditDays(creditDays ?? customDays ?? (body as Record<string, unknown>).creditTerm ?? 30);
-    // Alternative term branch already handled via parseCreditDays; keep backward compat
     const effectiveDays = normalizeCreditTerm(body as Record<string, unknown>, days);
 
     let resolvedCustomerId = customerId ? String(customerId) : null;
@@ -190,21 +232,25 @@ ledger.post("/", async (c) => {
       }
     } else {
       const exists = await prisma.customer.findUnique({ where: { id: resolvedCustomerId } });
-      if (!exists) return c.json({ error: "Customer not found" }, 404);
+      if (!exists || (exists as any).deletedAt) return c.json({ error: "Customer not found" }, 404);
     }
 
     const orderRef = orderId ? String(orderId) : null;
     if (orderRef) {
       const o = await prisma.order.findUnique({ where: { id: orderRef } });
-      if (!o) return c.json({ error: "Order not found for orderId" }, 404);
+      if (!o || (o as any).deletedAt) return c.json({ error: "Order not found for orderId" }, 404);
+      if (shopId && (o as any).shopId && (o as any).shopId !== shopId) return c.json({ error: "Order belongs to different shop" }, 403);
     }
 
     const dueDateNormalized = computeDueDate(effectiveDays);
 
-    // Transaction: ledger + balance increment
+    // Transaction: ledger + balance increment + shop/counter/user tracking
     const entry = await prisma.$transaction(async (tx) => {
       const e = await tx.ledgerEntry.create({
         data: {
+          shopId: shopId!,
+          counterId,
+          userId: user.userId,
           customerId: resolvedCustomerId!,
           orderId: orderRef,
           amount: parsedAmount,
@@ -234,12 +280,14 @@ ledger.post("/", async (c) => {
 // GET /api/ledger/:id
 ledger.get("/:id", async (c) => {
   const id = c.req.param("id");
+  const { user, shopId } = getShopScope(c);
   try {
     const entry = await prisma.ledgerEntry.findUnique({
       where: { id },
-      include: { customer: { select: { id: true, name: true, phone: true, balance: true } }, order: { select: { id: true, orderNumber: true, total: true } } },
+      include: { customer: { select: { id: true, name: true, phone: true, balance: true } }, order: { select: { id: true, orderNumber: true, total: true } }, shop: { select: { id: true, name: true } }, counter: { select: { id: true, name: true } } },
     });
-    if (!entry) return c.json({ error: "Not found" }, 404);
+    if (!entry || (entry as any).deletedAt) return c.json({ error: "Not found" }, 404);
+    if (shopId && (entry as any).shopId && (entry as any).shopId !== shopId && user.role !== "SUPER_ADMIN") return c.json({ error: "Forbidden" }, 403);
     return c.json({ entry });
   } catch (e) {
     return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);
@@ -249,12 +297,14 @@ ledger.get("/:id", async (c) => {
 // PATCH /api/ledger/:id {action: settle|reopen}
 ledger.patch("/:id", async (c) => {
   const id = c.req.param("id");
+  const { user, shopId } = getShopScope(c);
   try {
     const body = await c.req.json().catch(() => ({}));
     const action = (body.action ?? "settle").toLowerCase();
 
     const entry = await prisma.ledgerEntry.findUnique({ where: { id }, include: { customer: true } });
-    if (!entry) return c.json({ error: "Ledger entry not found" }, 404);
+    if (!entry || (entry as any).deletedAt) return c.json({ error: "Ledger entry not found" }, 404);
+    if (shopId && (entry as any).shopId && (entry as any).shopId !== shopId && user.role !== "SUPER_ADMIN") return c.json({ error: "Forbidden" }, 403);
 
     if (action === "settle" || action === "paid" || action === "collect") {
       if (entry.status === "settled") {
@@ -303,24 +353,49 @@ ledger.patch("/:id", async (c) => {
   }
 });
 
-// DELETE /api/ledger/:id — transactional to keep balance consistent
+// DELETE /api/ledger/:id — transactional soft delete
 ledger.delete("/:id", async (c) => {
   const id = c.req.param("id");
+  const { user, shopId } = getShopScope(c);
   try {
     const entry = await prisma.ledgerEntry.findUnique({ where: { id } });
-    if (!entry) return c.json({ error: "Not found" }, 404);
+    if (!entry || (entry as any).deletedAt) return c.json({ error: "Not found" }, 404);
+    if (shopId && (entry as any).shopId && (entry as any).shopId !== shopId && user.role !== "SUPER_ADMIN") return c.json({ error: "Forbidden" }, 403);
     await prisma.$transaction(async (tx) => {
       if (entry.status === "pending") {
         await tx.customer.update({ where: { id: entry.customerId }, data: { balance: { decrement: entry.amount } } });
         const cust = await tx.customer.findUnique({ where: { id: entry.customerId } });
         if (cust && cust.balance < 0) await tx.customer.update({ where: { id: cust.id }, data: { balance: 0 } });
       }
-      await tx.ledgerEntry.delete({ where: { id } });
+      await tx.ledgerEntry.update({ where: { id }, data: { deletedAt: new Date() } as any });
     });
-    return c.json({ success: true });
+    return c.json({ success: true, softDeleted: true });
   } catch (e) {
     const appErr = toAppError(e);
     return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 404 | 500 | 503);
+  }
+});
+
+// POST /api/ledger/:id/restore
+ledger.post("/:id/restore", async (c) => {
+  const id = c.req.param("id");
+  const { user, shopId } = getShopScope(c);
+  try {
+    const entry = await prisma.ledgerEntry.findUnique({ where: { id } });
+    if (!entry) return c.json({ error: "Not found" }, 404);
+    if (!(entry as any).deletedAt) return c.json({ entry, message: "Already active" });
+    if (shopId && (entry as any).shopId && (entry as any).shopId !== shopId && user.role !== "SUPER_ADMIN") return c.json({ error: "Forbidden" }, 403);
+    // restore also re-increment balance if pending
+    await prisma.$transaction(async (tx) => {
+      await tx.ledgerEntry.update({ where: { id }, data: { deletedAt: null } as any });
+      if (entry.status === "pending") {
+        await tx.customer.update({ where: { id: entry.customerId }, data: { balance: { increment: entry.amount } } });
+      }
+    });
+    const restored = await prisma.ledgerEntry.findUnique({ where: { id }, include: { customer: { select: { id: true, name: true, phone: true, balance: true } } } });
+    return c.json({ entry: restored });
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);
   }
 });
 

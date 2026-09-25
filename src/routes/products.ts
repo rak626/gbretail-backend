@@ -1,17 +1,28 @@
 import { Hono } from "hono";
 import { prisma } from "../lib/prisma.js";
 import { products as staticProducts } from "../data/products.js";
+import { requireAuth } from "../middleware/auth.js";
 
 const products = new Hono();
 
-// GET /api/products?search&category&limit
+products.use("*", requireAuth as any);
+
+// GET /api/products?search&category&limit&shopId
 products.get("/", async (c) => {
   const search = (c.req.query("search") ?? "").toLowerCase();
   const category = c.req.query("category") ?? "All";
-  const limit = parseInt(c.req.query("limit") ?? "100", 10);
+  const rawLimit = parseInt(c.req.query("limit") ?? "100", 10);
+  const limit = isNaN(rawLimit) ? 100 : rawLimit;
+  const user = (c as any).get("user" as any) as any;
+  const shopId = ((c as any).get("shopId" as any) as string | null) || c.req.query("shopId") || user?.shopId || null;
 
   try {
-    const where: Record<string, unknown> = {};
+    const where: Record<string, unknown> = { deletedAt: null };
+    if (shopId) {
+      (where as any).shopId = shopId;
+    } else if (user?.role !== "SUPER_ADMIN") {
+      return c.json({ error: "Shop not assigned — contact admin", code: "NO_SHOP" }, 403);
+    }
     if (search) {
       where.OR = [
         { name: { contains: search, mode: "insensitive" as const } },
@@ -52,9 +63,15 @@ products.get("/", async (c) => {
 // GET /api/products/:id
 products.get("/:id", async (c) => {
   const id = c.req.param("id");
+  const user = (c as any).get("user" as any) as any;
+  const shopId = ((c as any).get("shopId" as any) as string | null) || user?.shopId || null;
   try {
     const product = await prisma.product.findUnique({ where: { id } });
-    if (!product) return c.json({ error: "Not found" }, 404);
+    if (!product || (product as any).deletedAt) return c.json({ error: "Not found" }, 404);
+    if (shopId && (product as any).shopId && (product as any).shopId !== shopId && user.role !== "SUPER_ADMIN") {
+      return c.json({ error: "Forbidden — product belongs to another shop" }, 403);
+    }
+    if (!shopId && user.role !== "SUPER_ADMIN") return c.json({ error: "Shop not assigned" }, 403);
     return c.json({ product });
   } catch (e) {
     return c.json({ error: e instanceof Error ? e.message : "Error" }, 500);
@@ -64,8 +81,14 @@ products.get("/:id", async (c) => {
 // POST /api/products
 products.post("/", async (c) => {
   try {
+    const user = (c as any).get("user" as any) as any;
     const body = await c.req.json();
-    const { id, name, is_loose, rate_per_kg, barcode, price, costPrice, unit, category, preset_weights, preset_prices, stockQuantity } = body;
+    let shopId: string | null = ((c as any).get("shopId" as any) as string | null) || user?.shopId || null;
+    if (user.role === "SUPER_ADMIN" && (body as any).shopId) shopId = String((body as any).shopId);
+    if (!shopId && user.role !== "SUPER_ADMIN") return c.json({ error: "Shop not assigned" }, 403);
+    if (user.role === "SUPER_ADMIN" && !shopId) return c.json({ error: "shopId required for SUPER_ADMIN" }, 400);
+
+    const { id, name, is_loose, rate_per_kg, barcode, price, costPrice, unit, category, preset_weights, preset_prices, stockQuantity } = body as any;
 
     if (!name || !category) {
       return c.json({ error: "name and category required" }, 400);
@@ -84,13 +107,21 @@ products.post("/", async (c) => {
     }
 
     if (barcode) {
-      const existing = await prisma.product.findUnique({ where: { barcode } });
-      if (existing && existing.id !== id) {
-        return c.json({ error: "Barcode already exists" }, 409);
+      const trimmed = String(barcode).trim();
+      // per-shop barcode uniqueness (allow same barcode across shops)
+      const existing = await prisma.product.findFirst({ where: { barcode: trimmed, shopId: shopId!, deletedAt: null } as any });
+      if (existing && (existing as any).id !== id) {
+        return c.json({ error: "Barcode already exists in this shop" }, 409);
+      }
+      // also global uniqueness fallback for old data where shopId null — check global
+      if (!shopId) {
+        const global = await prisma.product.findUnique({ where: { barcode: trimmed } } as any);
+        if (global && (global as any).id !== id) return c.json({ error: "Barcode already exists" }, 409);
       }
     }
 
-    const data = {
+    const data: Record<string, unknown> = {
+      shopId,
       name: String(name).trim(),
       is_loose: Boolean(is_loose),
       rate_per_kg: rate_per_kg != null ? Number(rate_per_kg) : null,
@@ -99,20 +130,29 @@ products.post("/", async (c) => {
       costPrice: Number(costPrice),
       unit: unit ? String(unit) : "pcs",
       category: String(category),
-      preset_weights: Array.isArray(preset_weights) ? preset_weights.map(Number) : [],
-      preset_prices: Array.isArray(preset_prices) ? preset_prices.map(Number) : [],
+      preset_weights: Array.isArray(preset_weights) ? (preset_weights as unknown[]).map(Number).filter((n) => !isNaN(n)) : [],
+      preset_prices: Array.isArray(preset_prices) ? (preset_prices as unknown[]).map(Number).filter((n) => !isNaN(n)) : [],
       stockQuantity: stockQuantity != null ? Number(stockQuantity) : 100,
     };
 
+    // validate stockQuantity
+    if ((data.stockQuantity as number) < 0) return c.json({ error: "stockQuantity cannot be negative" }, 400);
+    if (data.preset_weights && (data.preset_weights as number[]).some((n) => n <= 0)) return c.json({ error: "preset_weights must be positive" }, 400);
+
     let product;
     if (id) {
+      // check existing belongs to same shop
+      const existing = await prisma.product.findUnique({ where: { id } });
+      if (existing && (existing as any).shopId && (existing as any).shopId !== shopId && user.role !== "SUPER_ADMIN") {
+        return c.json({ error: "Forbidden — cannot upsert product of another shop" }, 403);
+      }
       product = await prisma.product.upsert({
         where: { id },
-        update: data,
-        create: { id, ...data },
+        update: data as any,
+        create: { id, ...(data as any) },
       });
     } else {
-      product = await prisma.product.create({ data });
+      product = await prisma.product.create({ data: data as any });
     }
 
     return c.json({ product }, 201);
@@ -129,7 +169,15 @@ products.post("/", async (c) => {
 // PATCH /api/products/:id — whitelist to prevent mutating id/createdAt/deletedAt
 products.patch("/:id", async (c) => {
   const id = c.req.param("id");
+  const user = (c as any).get("user" as any) as any;
+  const shopId = ((c as any).get("shopId" as any) as string | null) || user?.shopId || null;
   try {
+    const existing = await prisma.product.findUnique({ where: { id } });
+    if (!existing || (existing as any).deletedAt) return c.json({ error: "Not found" }, 404);
+    if (shopId && (existing as any).shopId && (existing as any).shopId !== shopId && user.role !== "SUPER_ADMIN") {
+      return c.json({ error: "Forbidden" }, 403);
+    }
+
     const body = await c.req.json();
     const allowed: Record<string, unknown> = {};
     const fields = ["name", "is_loose", "rate_per_kg", "barcode", "price", "costPrice", "unit", "category", "preset_weights", "preset_prices", "stockQuantity"] as const;
@@ -142,23 +190,28 @@ products.patch("/:id", async (c) => {
     }
     if (allowed.price != null) allowed.price = Number(allowed.price as number);
     if (allowed.rate_per_kg != null) allowed.rate_per_kg = Number(allowed.rate_per_kg as number);
-    if (allowed.stockQuantity != null) allowed.stockQuantity = Number(allowed.stockQuantity as number);
+    if (allowed.stockQuantity != null) {
+      const sq = Number(allowed.stockQuantity as number);
+      if (isNaN(sq) || sq < 0) return c.json({ error: "stockQuantity must be >=0" }, 400);
+      allowed.stockQuantity = sq;
+    }
     if (allowed.name != null) allowed.name = String(allowed.name).trim();
     if (allowed.category != null) allowed.category = String(allowed.category);
     if (allowed.barcode != null) allowed.barcode = allowed.barcode ? String(allowed.barcode).trim() : null;
     if (allowed.unit != null) allowed.unit = String(allowed.unit);
-    if (allowed.preset_weights != null) allowed.preset_weights = Array.isArray(allowed.preset_weights) ? (allowed.preset_weights as unknown[]).map(Number) : [];
-    if (allowed.preset_prices != null) allowed.preset_prices = Array.isArray(allowed.preset_prices) ? (allowed.preset_prices as unknown[]).map(Number) : [];
+    if (allowed.preset_weights != null) allowed.preset_weights = Array.isArray(allowed.preset_weights) ? (allowed.preset_weights as unknown[]).map(Number).filter((n) => !isNaN(n)) : [];
+    if (allowed.preset_prices != null) allowed.preset_prices = Array.isArray(allowed.preset_prices) ? (allowed.preset_prices as unknown[]).map(Number).filter((n) => !isNaN(n)) : [];
 
     if (Object.keys(allowed).length === 0) return c.json({ error: "No valid fields to update" }, 400);
 
-    // Barcode uniqueness guard
+    // Barcode uniqueness guard per shop
     if (allowed.barcode) {
-      const dup = await prisma.product.findUnique({ where: { barcode: String(allowed.barcode) } });
-      if (dup && dup.id !== id) return c.json({ error: "Barcode already exists" }, 409);
+      const trimmed = String(allowed.barcode);
+      const dup = await prisma.product.findFirst({ where: { barcode: trimmed, shopId: (existing as any).shopId, deletedAt: null } as any });
+      if (dup && (dup as any).id !== id) return c.json({ error: "Barcode already exists in this shop" }, 409);
     }
 
-    const product = await prisma.product.update({ where: { id }, data: allowed });
+    const product = await prisma.product.update({ where: { id }, data: allowed as any });
     return c.json({ product });
   } catch (e) {
     const { toAppError } = await import("../lib/errors.js");
@@ -167,12 +220,40 @@ products.patch("/:id", async (c) => {
   }
 });
 
-// DELETE /api/products/:id
+// DELETE /api/products/:id — always soft delete
 products.delete("/:id", async (c) => {
   const id = c.req.param("id");
+  const user = (c as any).get("user" as any) as any;
+  const shopId = ((c as any).get("shopId" as any) as string | null) || user?.shopId || null;
   try {
-    await prisma.product.delete({ where: { id } });
-    return c.json({ success: true });
+    const existing = await prisma.product.findUnique({ where: { id } });
+    if (!existing) return c.json({ error: "Not found" }, 404);
+    if ((existing as any).deletedAt) return c.json({ error: "Already deleted" }, 409);
+    if (shopId && (existing as any).shopId && (existing as any).shopId !== shopId && user.role !== "SUPER_ADMIN") {
+      return c.json({ error: "Forbidden" }, 403);
+    }
+    // Check if product has orderItems (history) — still allow soft delete
+    const product = await prisma.product.update({ where: { id }, data: { deletedAt: new Date() } as any });
+    return c.json({ success: true, softDeleted: true, product });
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : "Error" }, 500);
+  }
+});
+
+// POST /api/products/:id/restore
+products.post("/:id/restore", async (c) => {
+  const id = c.req.param("id");
+  const user = (c as any).get("user" as any) as any;
+  const shopId = ((c as any).get("shopId" as any) as string | null) || user?.shopId || null;
+  try {
+    const existing = await prisma.product.findUnique({ where: { id } });
+    if (!existing) return c.json({ error: "Not found" }, 404);
+    if (!(existing as any).deletedAt) return c.json({ product: existing, message: "Already active" });
+    if (shopId && (existing as any).shopId && (existing as any).shopId !== shopId && user.role !== "SUPER_ADMIN") {
+      return c.json({ error: "Forbidden" }, 403);
+    }
+    const product = await prisma.product.update({ where: { id }, data: { deletedAt: null } as any });
+    return c.json({ product });
   } catch (e) {
     return c.json({ error: e instanceof Error ? e.message : "Error" }, 500);
   }

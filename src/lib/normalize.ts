@@ -2,8 +2,11 @@
 
 export function normalizePhone(raw: unknown): string | null {
   if (raw == null || String(raw).trim() === "") return null;
-  const digits = String(raw).trim().replace(/\D/g, "").slice(0, 10);
-  return digits || null;
+  const digits = String(raw).trim().replace(/\D/g, "");
+  if (!digits) return null;
+  // keep last 10 digits (handles country code like 919876543210 -> 9876543210)
+  const last10 = digits.slice(-10);
+  return last10 || null;
 }
 
 export function validatePhone(phone: string | null): boolean {
@@ -34,8 +37,9 @@ export function parseCreditDays(input: unknown, fallback = 30): number {
 }
 
 export function normalizeCreditTerm(body: Record<string, unknown>, fallback = 30): number {
-  // Supports 7/15/30 via body.creditTerm as in ledger POST
-  if (body.creditTerm === 7 || body.creditTerm === 15 || body.creditTerm === 30) return Number(body.creditTerm);
+  // Supports 7/15/30 via body.creditTerm as in ledger POST — coerce string to number
+  const ct = body.creditTerm != null ? Number(body.creditTerm) : null;
+  if (ct === 7 || ct === 15 || ct === 30) return ct;
   const raw = body.creditDays ?? body.customDays ?? fallback;
   return parseCreditDays(raw, fallback);
 }

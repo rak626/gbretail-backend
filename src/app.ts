@@ -11,6 +11,10 @@ import customers from "./routes/customers.js";
 import orders from "./routes/orders.js";
 import ledger from "./routes/ledger.js";
 import analytics from "./routes/analytics.js";
+import auth from "./routes/auth.js";
+import shops from "./routes/shops.js";
+import counters from "./routes/counters.js";
+import users from "./routes/users.js";
 
 export function createApp() {
   const app = new Hono();
@@ -34,7 +38,11 @@ export function createApp() {
   // Root — version from package.json would be ideal; keep static but single source intent
   app.get("/", (c) => c.json({ name: "gbretail-backend", status: "ok", version: "1.0.0" }));
 
-  // Mount API
+  // Mount API — auth is public, shops/counters/users require auth internally
+  app.route("/api/auth", auth);
+  app.route("/api/shops", shops);
+  app.route("/api/counters", counters);
+  app.route("/api/users", users);
   app.route("/api/health", health);
   app.route("/api/stats", stats);
   app.route("/api/products", products);

@@ -3,8 +3,11 @@ import { prisma } from "../lib/prisma.js";
 import { normalizePhone, normalizeEmail } from "../lib/normalize.js";
 import { toAppError } from "../lib/errors.js";
 import { startOfDay } from "../lib/utils.js";
+import { requireAuth } from "../middleware/auth.js";
 
 const customers = new Hono();
+
+customers.use("*", requireAuth as any);
 
 // GET /api/customers?q&limit&page&sortBy&sortOrder&hasBalance&includeDeleted&due
 // hasBalance: "with" | "without" | ""  (balance >0 vs =0)
@@ -267,6 +270,7 @@ customers.post("/", async (c) => {
       }
     }
 
+    // Never trust client balance — always 0, modulated via orders/ledger tx
     const customer = await prisma.customer.create({
       data: {
         name: trimmedName,
@@ -275,7 +279,7 @@ customers.post("/", async (c) => {
         address: trimmedAddress,
         notes: trimmedNotes,
         creditLimit: parsedCreditLimit,
-        balance: balance != null ? Number(balance) : 0,
+        balance: 0,
       },
     });
 
