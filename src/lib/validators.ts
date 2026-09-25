@@ -38,7 +38,7 @@ export function validateCustomerCreate(body: Record<string, unknown>): CustomerI
 }
 
 export function validateProductCreate(body: Record<string, unknown>): Record<string, unknown> {
-  const { name, category, costPrice, is_loose, rate_per_kg, price } = body as any;
+  const { name, category, costPrice, is_loose, rate_per_kg, price, lowStockThreshold } = body as any;
   if (!name || !category) throw Object.assign(new Error("name and category required"), { status: 400 });
   if (costPrice == null || isNaN(Number(costPrice)) || Number(costPrice) < 0) throw Object.assign(new Error("costPrice (buying price) is required and must be >=0"), { status: 400 });
   if (is_loose) {
@@ -46,5 +46,6 @@ export function validateProductCreate(body: Record<string, unknown>): Record<str
   } else {
     if (price == null || isNaN(Number(price)) || Number(price) < 0) throw Object.assign(new Error("price required for packaged"), { status: 400 });
   }
+  if (lowStockThreshold != null && (isNaN(Number(lowStockThreshold)) || Number(lowStockThreshold) < 0)) throw Object.assign(new Error("lowStockThreshold must be >= 0"), { status: 400 });
   return body as Record<string, unknown>;
 }

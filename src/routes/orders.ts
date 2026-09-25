@@ -180,6 +180,8 @@ orders.post("/", async (c) => {
     total = netTotal;
 
     // Use transaction to ensure atomicity: customer updates + order + ledger + stock
+    // lowStockWarnings is informational only — sales are never blocked (warn-only)
+    const lowStockWarnings: Array<{ productId: string; name: string; stockQuantity: number; lowStockThreshold: number; unit: string }> = [];
     const order = await prisma.$transaction(async (tx) => {
       // Order number per shop with retry on conflict
       let orderNumber: string;
@@ -326,13 +328,24 @@ orders.post("/", async (c) => {
             const fresh = await tx.product.findUnique({ where: { id: String(it.productId) }, select: { stockQuantity: true, name: true } });
             throw new AppError(409, `Insufficient stock for ${fresh?.name ?? (it as any).name}. Available: ${fresh?.stockQuantity ?? 0}, requested: ${qty}`);
           }
+          // Warn-only: flag products now at/below their own threshold (never blocks the sale)
+          const after = await tx.product.findUnique({ where: { id: String(it.productId) }, select: { stockQuantity: true, name: true, lowStockThreshold: true, unit: true } });
+          if (after && (after.stockQuantity ?? 0) <= ((after as any).lowStockThreshold ?? 10)) {
+            lowStockWarnings.push({
+              productId: String(it.productId),
+              name: (after as any).name,
+              stockQuantity: (after as any).stockQuantity ?? 0,
+              lowStockThreshold: (after as any).lowStockThreshold ?? 10,
+              unit: (after as any).unit ?? "pcs",
+            });
+          }
         }
       }
 
       return createdOrder;
     });
 
-    return c.json({ order }, 201);
+    return c.json({ order, lowStockWarnings }, 201);
   } catch (e) {
     console.error("[POST /orders]", e);
     const appErr = toAppError(e);

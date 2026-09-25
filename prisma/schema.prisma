@@ -76,6 +76,7 @@ model Product {
   preset_weights Float[]     @default([])
   preset_prices  Float[]     @default([])
   stockQuantity  Float       @default(0)
+  lowStockThreshold Float    @default(10)
   deletedAt      DateTime?
   createdAt      DateTime    @default(now())
   updatedAt      DateTime    @updatedAt

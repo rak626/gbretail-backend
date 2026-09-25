@@ -87,6 +87,8 @@ async function main() {
   for (const p of products) {
     const sell = (p as any).price ?? (p as any).rate_per_kg ?? 0;
     const cost = sell ? Math.round(sell * 0.78 * 100) / 100 : 0;
+    const unit = (p as any).unit ?? "pcs";
+    const lowStockThreshold = (p as any).lowStockThreshold ?? 10;
     await prisma.product.upsert({
       where: { id: p.id },
       update: {
@@ -98,6 +100,8 @@ async function main() {
         price: (p as any).price ?? null,
         costPrice: (p as any).costPrice ?? cost,
         category: (p as any).category,
+        unit,
+        lowStockThreshold,
         preset_weights: (p as any).preset_weights ?? [],
         preset_prices: (p as any).preset_prices ?? [],
         stockQuantity: 100,
@@ -113,6 +117,8 @@ async function main() {
         price: (p as any).price ?? null,
         costPrice: (p as any).costPrice ?? cost,
         category: (p as any).category,
+        unit,
+        lowStockThreshold,
         preset_weights: (p as any).preset_weights ?? [],
         preset_prices: (p as any).preset_prices ?? [],
         stockQuantity: 100,

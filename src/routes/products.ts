@@ -88,7 +88,7 @@ products.post("/", async (c) => {
     if (!shopId && user.role !== "SUPER_ADMIN") return c.json({ error: "Shop not assigned" }, 403);
     if (user.role === "SUPER_ADMIN" && !shopId) return c.json({ error: "shopId required for SUPER_ADMIN" }, 400);
 
-    const { id, name, is_loose, rate_per_kg, barcode, price, costPrice, unit, category, preset_weights, preset_prices, stockQuantity } = body as any;
+    const { id, name, is_loose, rate_per_kg, barcode, price, costPrice, unit, category, preset_weights, preset_prices, stockQuantity, lowStockThreshold } = body as any;
 
     if (!name || !category) {
       return c.json({ error: "name and category required" }, 400);
@@ -133,10 +133,12 @@ products.post("/", async (c) => {
       preset_weights: Array.isArray(preset_weights) ? (preset_weights as unknown[]).map(Number).filter((n) => !isNaN(n)) : [],
       preset_prices: Array.isArray(preset_prices) ? (preset_prices as unknown[]).map(Number).filter((n) => !isNaN(n)) : [],
       stockQuantity: stockQuantity != null ? Number(stockQuantity) : 100,
+      lowStockThreshold: lowStockThreshold != null ? Number(lowStockThreshold) : 10,
     };
 
     // validate stockQuantity
     if ((data.stockQuantity as number) < 0) return c.json({ error: "stockQuantity cannot be negative" }, 400);
+    if (isNaN(data.lowStockThreshold as number) || (data.lowStockThreshold as number) < 0) return c.json({ error: "lowStockThreshold must be >= 0" }, 400);
     if (data.preset_weights && (data.preset_weights as number[]).some((n) => n <= 0)) return c.json({ error: "preset_weights must be positive" }, 400);
 
     let product;
@@ -180,7 +182,7 @@ products.patch("/:id", async (c) => {
 
     const body = await c.req.json();
     const allowed: Record<string, unknown> = {};
-    const fields = ["name", "is_loose", "rate_per_kg", "barcode", "price", "costPrice", "unit", "category", "preset_weights", "preset_prices", "stockQuantity"] as const;
+    const fields = ["name", "is_loose", "rate_per_kg", "barcode", "price", "costPrice", "unit", "category", "preset_weights", "preset_prices", "stockQuantity", "lowStockThreshold"] as const;
     for (const k of fields) if (k in body) allowed[k] = (body as Record<string, unknown>)[k];
 
     if (allowed.costPrice != null) {
@@ -194,6 +196,11 @@ products.patch("/:id", async (c) => {
       const sq = Number(allowed.stockQuantity as number);
       if (isNaN(sq) || sq < 0) return c.json({ error: "stockQuantity must be >=0" }, 400);
       allowed.stockQuantity = sq;
+    }
+    if (allowed.lowStockThreshold != null) {
+      const lt = Number(allowed.lowStockThreshold as number);
+      if (isNaN(lt) || lt < 0) return c.json({ error: "lowStockThreshold must be >= 0" }, 400);
+      allowed.lowStockThreshold = lt;
     }
     if (allowed.name != null) allowed.name = String(allowed.name).trim();
     if (allowed.category != null) allowed.category = String(allowed.category);

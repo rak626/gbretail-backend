@@ -19,13 +19,18 @@ stats.get("/", async (c) => {
     const accessError = !shopId && user.role !== "SUPER_ADMIN" ? true : false;
     if (accessError) return c.json({ error: "Shop not assigned" }, 403);
 
-    const [todayOrders, totalOrders, totalRevenueAgg, customersCount, lowStock] = await Promise.all([
+    const [todayOrders, totalOrders, totalRevenueAgg, customersCount, stockCandidates] = await Promise.all([
       prisma.order.findMany({ where: { createdAt: { gte: todayStart, lte: todayEnd }, deletedAt: null, ...shopFilter } as any, select: { total: true, paymentMethod: true } }),
       prisma.order.count({ where: { deletedAt: null, ...shopFilter } as any }),
       prisma.order.aggregate({ where: { deletedAt: null, ...shopFilter } as any, _sum: { total: true } }),
       prisma.customer.count({ where: { deletedAt: null } }),
-      prisma.product.findMany({ where: { stockQuantity: { lt: 10 }, deletedAt: null, ...(shopId ? { shopId } : {}) } as any, select: { id: true, name: true, stockQuantity: true, shopId: true }, take: 5 }),
+      prisma.product.findMany({ where: { deletedAt: null, ...(shopId ? { shopId } : {}) } as any, select: { id: true, name: true, stockQuantity: true, lowStockThreshold: true, unit: true, shopId: true }, orderBy: { stockQuantity: "asc" }, take: 100 }),
     ]);
+
+    // Per-product low-stock: warn when stockQuantity <= that product's own threshold
+    const lowStock = (stockCandidates as Array<{ id: string; name: string; stockQuantity: number; lowStockThreshold: number | null; unit: string; shopId: string | null }>)
+      .filter((p) => (p.stockQuantity ?? 0) <= (p.lowStockThreshold ?? 10))
+      .slice(0, 5);
 
     const todayRevenue = todayOrders.reduce((s: number, o: { total: number }) => s + o.total, 0);
     const todayByPayment: Record<string, number> = {};

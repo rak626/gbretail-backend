@@ -1,11 +1,27 @@
 export const products = [
+  // Loose multi-price example: each quality/rate is its own product with its own stock.
+  // Naming convention: "{Item} – {Quality} @ ₹{rate}/kg" so both are searchable by "sugar".
   {
     id: "p1",
-    name: "Sugar (Loose / Chini)",
+    name: "Sugar – Economy @ ₹40/kg",
     is_loose: true,
-    rate_per_kg: 48.0,
-  costPrice: 37.44,
+    rate_per_kg: 40.0,
+  costPrice: 31.2,
   category: "Staples",
+    unit: "kg",
+    lowStockThreshold: 5,
+    preset_weights: [100, 200, 300, 500, 1000],
+    preset_prices: [20, 50, 100],
+  },
+  {
+    id: "p31",
+    name: "Sugar – Premium @ ₹50/kg",
+    is_loose: true,
+    rate_per_kg: 50.0,
+  costPrice: 39.0,
+  category: "Staples",
+    unit: "kg",
+    lowStockThreshold: 5,
     preset_weights: [100, 200, 300, 500, 1000],
     preset_prices: [20, 50, 100],
   },
@@ -17,6 +33,8 @@ export const products = [
     price: 28.0,
   costPrice: 21.84,
   category: "Packaged",
+    unit: "pcs",
+    lowStockThreshold: 10,
   },
   {
     id: "p3",
@@ -45,6 +63,8 @@ export const products = [
     price: 450.0,
   costPrice: 351.0,
   category: "Staples",
+    unit: "bag",
+    lowStockThreshold: 2,
   },
   {
     id: "p6",
