@@ -1,6 +1,5 @@
 import { Hono } from "hono";
 import { prisma } from "../lib/prisma.js";
-import { products as staticProducts } from "../data/products.js";
 import { requireAuth } from "../middleware/auth.js";
 
 const products = new Hono();
@@ -58,18 +57,9 @@ products.get("/", async (c) => {
 
     return c.json({ products: items, source: "db" });
   } catch (e) {
-    console.warn("[GET /products] DB fallback to static:", e instanceof Error ? e.message : e);
-    let filtered = staticProducts as unknown as Array<Record<string, unknown>>;
-    if (search) {
-      filtered = filtered.filter(
-        (p) => String(p.name).toLowerCase().includes(search) || String(p.barcode ?? "").includes(search)
-      );
-    }
-    if (category && category !== "All") {
-      if (category === "Loose Items") filtered = filtered.filter((p) => p.is_loose);
-      else filtered = filtered.filter((p) => p.category === category);
-    }
-    return c.json({ products: filtered.slice(0, limit), source: "static" });
+    // No hardcoded fallback: catalog is shop data and must come from the DB.
+    // A failure here is honest (offline clients use their cached catalog).
+    return c.json({ error: "Failed to load products" }, 500);
   }
 });
 

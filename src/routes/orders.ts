@@ -4,6 +4,7 @@ import { computeDueDate, generateOrderNumber, getNextOrderNumber } from "../lib/
 import { normalizePhone } from "../lib/normalize.js";
 import { toAppError, AppError } from "../lib/errors.js";
 import { requireAuth } from "../middleware/auth.js";
+import { resolveStaffCounter } from "../lib/staffCounter.js";
 
 const orders = new Hono();
 
@@ -149,8 +150,15 @@ orders.post("/", async (c) => {
       return c.json({ error: "Invalid paymentMethod" }, 400);
     }
 
-    // Counter validation: must belong to shop if provided
-    if (counterId) {
+    // Counter validation: STAFF always bill on their assigned counter
+    // (client value ignored — prevents forged counter attribution).
+    // Owner/super: must belong to shop if provided, else first active counter.
+    if (user.role === "STAFF") {
+      if (!shopId) return c.json({ error: "Shop not assigned" }, 403);
+      const sc = await resolveStaffCounter(user.userId, shopId);
+      if (!sc) return c.json({ error: "No counter assigned — contact owner" }, 403);
+      counterId = sc.id;
+    } else if (counterId) {
       const counter = await prisma.counter.findUnique({ where: { id: String(counterId) } });
       if (!counter || (counter as any).deletedAt || !(counter as any).isActive) return c.json({ error: "Counter not found or inactive" }, 404);
       if ((counter as any).shopId !== shopId) return c.json({ error: "Counter does not belong to shop" }, 403);

@@ -15,15 +15,15 @@ users.get("/", async (c) => {
     if (user.role === "SUPER_ADMIN") {
       const where: Record<string, unknown> = { deletedAt: null };
       if (queryShopId) (where as any).shopId = queryShopId;
-      const items = await prisma.user.findMany({ where, select: { id: true, shopId: true, email: true, name: true, role: true, canManageInventory: true, isActive: true, createdAt: true, shop: { select: { id: true, name: true } } }, orderBy: { createdAt: "desc" } });
+      const items = await prisma.user.findMany({ where, select: { id: true, shopId: true, email: true, name: true, role: true, canManageInventory: true, counterId: true, isActive: true, createdAt: true, shop: { select: { id: true, name: true } } }, orderBy: { createdAt: "desc" } });
       return c.json({ users: items });
     }
     if (user.role === "SHOP_OWNER") {
-      const items = await prisma.user.findMany({ where: { shopId: user.shopId, deletedAt: null }, select: { id: true, shopId: true, email: true, name: true, role: true, canManageInventory: true, isActive: true, createdAt: true }, orderBy: { createdAt: "desc" } });
+      const items = await prisma.user.findMany({ where: { shopId: user.shopId, deletedAt: null }, select: { id: true, shopId: true, email: true, name: true, role: true, canManageInventory: true, counterId: true, isActive: true, createdAt: true }, orderBy: { createdAt: "desc" } });
       return c.json({ users: items });
     }
     // STAFF can only see themselves? Return self
-    const self = await prisma.user.findUnique({ where: { id: user.userId }, select: { id: true, shopId: true, email: true, name: true, role: true, canManageInventory: true, isActive: true, createdAt: true } });
+    const self = await prisma.user.findUnique({ where: { id: user.userId }, select: { id: true, shopId: true, email: true, name: true, role: true, canManageInventory: true, counterId: true, isActive: true, createdAt: true } });
     return c.json({ users: self ? [self] : [] });
   } catch (e) {
     return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);
@@ -35,7 +35,7 @@ users.get("/:id", async (c) => {
   const user = (c as any).get("user" as any) as any;
   const id = c.req.param("id");
   try {
-    const target = await prisma.user.findUnique({ where: { id }, select: { id: true, shopId: true, email: true, name: true, role: true, canManageInventory: true, isActive: true, createdAt: true, deletedAt: true, shop: { select: { id: true, name: true } } } });
+    const target = await prisma.user.findUnique({ where: { id }, select: { id: true, shopId: true, email: true, name: true, role: true, canManageInventory: true, counterId: true, isActive: true, createdAt: true, deletedAt: true, shop: { select: { id: true, name: true } } } });
     if (!target || (target as any).deletedAt) return c.json({ error: "User not found" }, 404);
     if (user.role !== "SUPER_ADMIN" && (target as any).shopId !== user.shopId) return c.json({ error: "Forbidden" }, 403);
     if (user.role === "STAFF" && user.userId !== id) return c.json({ error: "Forbidden" }, 403);
@@ -80,6 +80,15 @@ users.post("/", requireRole("SUPER_ADMIN", "SHOP_OWNER") as any, async (c) => {
     if (existing && (existing as any).deletedAt) return c.json({ error: "Email belongs to deleted user — restore or use different email" }, 409);
 
     const passwordHash = await hashPassword(password);
+    // Owner-only counter assignment at creation (STAFF of own shop).
+    let counterId: string | null = null;
+    if (role === "STAFF" && body.counterId) {
+      if (actor.role !== "SHOP_OWNER") return c.json({ error: "Only the shop owner can assign counters" }, 403);
+      const counter = await prisma.counter.findUnique({ where: { id: String(body.counterId) } });
+      if (!counter || (counter as any).deletedAt || !(counter as any).isActive) return c.json({ error: "Counter not found or inactive" }, 404);
+      if ((counter as any).shopId !== actor.shopId) return c.json({ error: "Counter does not belong to your shop" }, 403);
+      counterId = counter.id;
+    }
     const created = await prisma.user.create({
       data: {
         email,
@@ -87,11 +96,12 @@ users.post("/", requireRole("SUPER_ADMIN", "SHOP_OWNER") as any, async (c) => {
         name,
         role,
         shopId,
-        // Owner-only grant at creation (STAFF only; owner always has it).
+        // Owner/super can grant inventory access at creation (STAFF only; owner always has it).
         // SUPER_ADMIN cannot grant — only the shop owner can.
         canManageInventory: role === "STAFF" && actor.role === "SHOP_OWNER" ? Boolean(body.canManageInventory) : false,
+        counterId,
       },
-      select: { id: true, shopId: true, email: true, name: true, role: true, canManageInventory: true, isActive: true, createdAt: true },
+      select: { id: true, shopId: true, email: true, name: true, role: true, canManageInventory: true, counterId: true, isActive: true, createdAt: true },
     });
     return c.json({ user: created }, 201);
   } catch (e) {
@@ -172,9 +182,24 @@ users.patch("/:id", async (c) => {
       if ((target as any).shopId !== actor.shopId) return c.json({ error: "Forbidden" }, 403);
       data.canManageInventory = Boolean(body.canManageInventory);
     }
+    if (body.counterId !== undefined) {
+      // Owner-only counter assignment for own-shop STAFF. Null unassigns
+      // (staff then falls back to the emptiest counter at next login).
+      if ((target as any).role !== "STAFF") return c.json({ error: "counterId applies to STAFF only" }, 400);
+      if (actor.role !== "SHOP_OWNER") return c.json({ error: "Only the shop owner can assign counters" }, 403);
+      if ((target as any).shopId !== actor.shopId) return c.json({ error: "Forbidden" }, 403);
+      if (body.counterId === null || body.counterId === "") {
+        data.counterId = null;
+      } else {
+        const counter = await prisma.counter.findUnique({ where: { id: String(body.counterId) } });
+        if (!counter || (counter as any).deletedAt || !(counter as any).isActive) return c.json({ error: "Counter not found or inactive" }, 404);
+        if ((counter as any).shopId !== actor.shopId) return c.json({ error: "Counter does not belong to your shop" }, 403);
+        data.counterId = counter.id;
+      }
+    }
 
     if (Object.keys(data).length === 0) return c.json({ error: "No valid fields" }, 400);
-    const updated = await prisma.user.update({ where: { id }, data, select: { id: true, shopId: true, email: true, name: true, role: true, canManageInventory: true, isActive: true, createdAt: true } });
+    const updated = await prisma.user.update({ where: { id }, data, select: { id: true, shopId: true, email: true, name: true, role: true, canManageInventory: true, counterId: true, isActive: true, createdAt: true } });
     return c.json({ user: updated });
   } catch (e) {
     return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);
@@ -206,7 +231,7 @@ users.post("/:id/restore", requireRole("SUPER_ADMIN", "SHOP_OWNER") as any, asyn
     if (!target) return c.json({ error: "Not found" }, 404);
     if (!(target as any).deletedAt) return c.json({ message: "Already active", user: target });
     if (actor.role === "SHOP_OWNER" && (target as any).shopId !== actor.shopId) return c.json({ error: "Forbidden" }, 403);
-    const updated = await prisma.user.update({ where: { id }, data: { deletedAt: null, isActive: true }, select: { id: true, shopId: true, email: true, name: true, role: true, canManageInventory: true, isActive: true } });
+    const updated = await prisma.user.update({ where: { id }, data: { deletedAt: null, isActive: true }, select: { id: true, shopId: true, email: true, name: true, role: true, canManageInventory: true, counterId: true, isActive: true } });
     return c.json({ user: updated });
   } catch (e) {
     return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);

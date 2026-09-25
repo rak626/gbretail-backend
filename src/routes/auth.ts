@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { setCookie, getCookie, deleteCookie } from "hono/cookie";
 import { prisma } from "../lib/prisma.js";
 import { verifyPassword, signAccessToken, signRefreshToken, verifyRefreshToken, verifyAccessToken, sanitizeUser } from "../lib/auth.js";
+import { resolveStaffCounter } from "../lib/staffCounter.js";
 import { requireAuth } from "../middleware/auth.js";
 
 const auth = new Hono();
@@ -16,7 +17,7 @@ auth.post("/login", async (c) => {
 
     if (!email || !password) return c.json({ error: "Email and password required" }, 400);
 
-    const user = await prisma.user.findUnique({ where: { email }, include: { shop: { select: { id: true, name: true, isActive: true, deletedAt: true } } } });
+    const user = await prisma.user.findUnique({ where: { email }, include: { shop: { select: { id: true, name: true, isActive: true, deletedAt: true } }, counter: { select: { id: true, name: true } } } });
     if (!user || (user as any).deletedAt) return c.json({ error: "Invalid credentials" }, 401);
     if (!(user as any).isActive) return c.json({ error: "Account disabled" }, 403);
     // Deactivated shop blocks its staff/owner at login (super admin unaffected).
@@ -29,15 +30,27 @@ auth.post("/login", async (c) => {
     const ok = await verifyPassword(password, (user as any).passwordHash);
     if (!ok) return c.json({ error: "Invalid credentials" }, 401);
 
-    // Validate counter belongs to same shop if provided
+    // Counter resolution:
+    // - STAFF: owner-assigned counter auto-attaches (request value ignored);
+    //   unassigned staff fall back to the emptiest active counter (session-only).
+    // - OWNER/SUPER: explicit choice as before.
     let resolvedCounterId: string | null = null;
-    if (counterId) {
+    let resolvedCounterName: string | null = null;
+    if ((user as any).role === "STAFF") {
+      const shopId = (user as any).shopId;
+      if (!shopId) return c.json({ error: "Shop not assigned — contact admin" }, 403);
+      const sc = await resolveStaffCounter(user.id, shopId);
+      if (!sc) return c.json({ error: "No counter assigned — contact owner" }, 403);
+      resolvedCounterId = sc.id;
+      resolvedCounterName = sc.name;
+    } else if (counterId) {
       const counter = await prisma.counter.findUnique({ where: { id: counterId } });
       if (!counter || (counter as any).deletedAt || !(counter as any).isActive) return c.json({ error: "Counter not found or inactive" }, 404);
       if (user.role !== "SUPER_ADMIN" && (counter as any).shopId !== (user as any).shopId) {
         return c.json({ error: "Counter does not belong to your shop" }, 403);
       }
       resolvedCounterId = counterId;
+      resolvedCounterName = (counter as any).name ?? null;
     }
 
     const payload = {
@@ -76,6 +89,7 @@ auth.post("/login", async (c) => {
       user: sanitizeUser(user as any),
       shop: (user as any).shop ?? null,
       counterId: resolvedCounterId,
+      counter: resolvedCounterId ? { id: resolvedCounterId, name: resolvedCounterName } : null,
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Login failed";
@@ -140,7 +154,7 @@ auth.post("/logout", async (c) => {
 auth.get("/me", requireAuth as any, async (c) => {
   const payload = (c as any).get("user" as any) as any;
   try {
-    const user = await prisma.user.findUnique({ where: { id: payload.userId }, include: { shop: { select: { id: true, name: true } } } });
+    const user = await prisma.user.findUnique({ where: { id: payload.userId }, include: { shop: { select: { id: true, name: true } }, counter: { select: { id: true, name: true } } } });
     if (!user || (user as any).deletedAt) return c.json({ error: "User not found" }, 404);
     // Return fresh shop/counter list for POS header
     let counters: unknown[] = [];

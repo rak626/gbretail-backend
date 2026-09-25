@@ -28,16 +28,16 @@ counters.get("/", async (c) => {
   return c.json({ counters: items });
 });
 
-// POST /api/counters {name, shopId?}
+// POST /api/counters {name?, shopId?}
+// Empty/blank name → auto-generate the first missing generic number:
+// existing {Counter 1, Counter 3} yields "Counter 2". Explicit names kept
+// for API compat; shop-level uniqueness is the race guard.
 counters.post("/", requireRole("SUPER_ADMIN", "SHOP_OWNER") as any, async (c) => {
   const user = (c as any).get("user" as any) as any;
   try {
     const body = await c.req.json();
     let shopId = body.shopId ? String(body.shopId) : null;
-    const name = String(body.name ?? "").trim();
-
-    if (!name) return c.json({ error: "Counter name required" }, 400);
-    if (name.length > 50) return c.json({ error: "Name too long" }, 400);
+    let name = String(body.name ?? "").trim();
 
     if (user.role === "SHOP_OWNER" || user.role === "STAFF") {
       shopId = user.shopId;
@@ -50,8 +50,30 @@ counters.post("/", requireRole("SUPER_ADMIN", "SHOP_OWNER") as any, async (c) =>
     const shop = await prisma.shop.findUnique({ where: { id: shopId } });
     if (!shop || (shop as any).deletedAt || !(shop as any).isActive) return c.json({ error: "Shop not found or inactive" }, 404);
 
-    const existing = await prisma.counter.findFirst({ where: { shopId, name, deletedAt: null } });
-    if (existing) return c.json({ error: "Counter name already exists in this shop" }, 409);
+    if (!name) {
+      const siblings = await prisma.counter.findMany({ where: { shopId, deletedAt: null }, select: { name: true } });
+      const taken = new Set<number>();
+      for (const s of siblings) {
+        const m = /^\s*counter\s+(\d+)\s*$/i.exec(s.name ?? "");
+        if (m) taken.add(parseInt(m[1], 10));
+      }
+      let n = 1;
+      while (taken.has(n)) n += 1;
+      name = `Counter ${n}`;
+    }
+    if (name.length > 50) return c.json({ error: "Name too long" }, 400);
+
+    const activeDup = await prisma.counter.findFirst({ where: { shopId, name, deletedAt: null } });
+    if (activeDup) return c.json({ error: "Counter name already exists in this shop" }, 409);
+
+    // A soft-deleted counter holds the unique name — re-adding it restores
+    // instead of crashing on the unique constraint. This is also what makes
+    // auto gap-fill work: deleting Counter 2 then adding recreates Counter 2.
+    const softDeleted = await prisma.counter.findFirst({ where: { shopId, name, deletedAt: { not: null } } });
+    if (softDeleted) {
+      const restored = await prisma.counter.update({ where: { id: softDeleted.id }, data: { deletedAt: null, isActive: true } });
+      return c.json({ counter: restored, restored: true }, 200);
+    }
 
     const counter = await prisma.counter.create({ data: { shopId, name } });
     return c.json({ counter }, 201);
@@ -89,7 +111,9 @@ counters.patch("/:id", requireRole("SUPER_ADMIN", "SHOP_OWNER") as any, async (c
   }
 });
 
-// DELETE /api/counters/:id — soft delete
+// DELETE /api/counters/:id — soft delete + auto-unassign attached staff
+// (their counterId is cleared; they fall back to the emptiest counter at
+// next login and show as Auto on the Users page).
 counters.delete("/:id", requireRole("SUPER_ADMIN", "SHOP_OWNER") as any, async (c) => {
   const user = (c as any).get("user" as any) as any;
   const id = c.req.param("id");
@@ -97,8 +121,9 @@ counters.delete("/:id", requireRole("SUPER_ADMIN", "SHOP_OWNER") as any, async (
     const counter = await prisma.counter.findUnique({ where: { id } });
     if (!counter || (counter as any).deletedAt) return c.json({ error: "Not found or already deleted" }, 404);
     if (user.role !== "SUPER_ADMIN" && (counter as any).shopId !== user.shopId) return c.json({ error: "Forbidden" }, 403);
+    const unassign = await prisma.user.updateMany({ where: { counterId: id, deletedAt: null }, data: { counterId: null } });
     const updated = await prisma.counter.update({ where: { id }, data: { deletedAt: new Date(), isActive: false } });
-    return c.json({ counter: updated, softDeleted: true });
+    return c.json({ counter: updated, softDeleted: true, unassignedStaff: unassign.count });
   } catch (e) {
     return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);
   }

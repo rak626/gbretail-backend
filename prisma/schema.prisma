@@ -35,6 +35,7 @@ model Counter {
   deletedAt DateTime?
   orders    Order[]
   ledgerEntries LedgerEntry[]
+  users     User[]
 
   @@unique([shopId, name])
   @@index([shopId])
@@ -52,6 +53,10 @@ model User {
   // Owner-granted permission: STAFF with this flag can open + edit inventory.
   // SHOP_OWNER always has full access; SUPER_ADMIN never touches shop inventory.
   canManageInventory Boolean @default(false)
+  // Owner-assigned till: staff bill on this counter (auto-attached at login).
+  // Null = unassigned → login falls back to the emptiest active counter.
+  counterId String?
+  counter   Counter? @relation(fields: [counterId], references: [id], onDelete: SetNull)
   isActive     Boolean   @default(true)
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt

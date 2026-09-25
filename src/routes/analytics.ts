@@ -21,8 +21,11 @@ analytics.use("*", requireAuth as any);
 const cache = new Map<string, { ts: number; data: any }>();
 const CACHE_TTL = 30_000;
 function cacheKey(c: any) {
+  // Key on user+role as well as URL — summary/sections are role- and
+  // shop-scoped, so a shared URL key would leak one role's data to another.
+  const u = (c as any).get("user" as any) as any;
   const url = c.req.url;
-  return url;
+  return `${u?.userId ?? "?"}:${u?.role ?? "?"}:${url}`;
 }
 function getCached(key: string) {
   const v = cache.get(key);
@@ -380,6 +383,156 @@ analytics.get("/summary", async (c) => {
     return c.json(result);
   } catch (e) {
     return c.json({ error: e instanceof Error ? e.message : "Failed to fetch analytics", timeseries: [], topProducts: [], categories: [] }, 500);
+  }
+});
+
+// GET /api/analytics/sections?preset&from&to(&shopId)
+// Role-aware breakdowns for the 5 analytics tabs:
+// - staff: SHOP_OWNER sees own-shop STAFF; SUPER_ADMIN sees SHOP_OWNERs (never staff)
+// - customers: new / active / repeat+retention / top / defaulters (shop-scoped via orders)
+// - shops: SUPER_ADMIN multi-shop compare; otherwise per-counter breakdown
+analytics.get("/sections", async (c) => {
+  const presetRaw = c.req.query("preset") ?? "7d";
+  const fromRaw = c.req.query("from");
+  const toRaw = c.req.query("to");
+
+  const user = (c as any).get("user" as any) as any;
+  const isSuper = user?.role === "SUPER_ADMIN";
+  const queryShopId = c.req.query("shopId") || null;
+  const scopeShopId = isSuper ? queryShopId : user?.shopId || null;
+  if (!scopeShopId && !isSuper) return c.json({ error: "Shop not assigned" }, 403);
+  const shopFilter: Record<string, unknown> = scopeShopId ? { shopId: scopeShopId } : {};
+
+  const ck = cacheKey(c);
+  const cached = getCached(ck);
+  if (cached) return c.json(cached);
+
+  try {
+    const bounds = getRangeBounds(presetRaw, fromRaw, toRaw, undefined);
+    const { start, end, label } = bounds;
+
+    // Range orders (scoped) with staff/counter/customer attribution + item units
+    const orders = await prisma.order.findMany({
+      where: { createdAt: { gte: start, lte: end }, deletedAt: null, ...shopFilter } as any,
+      select: {
+        id: true, total: true, discount: true, userId: true, customerId: true,
+        counterId: true, shopId: true, createdAt: true,
+        items: { select: { quantity: true, weight: true } },
+      },
+      orderBy: { createdAt: "asc" },
+    });
+    const rangeRevenue = orders.reduce((s, o) => s + Number(o.total ?? 0), 0);
+
+    // ---- Staff: owner sees staff, super sees owners ----
+    const peopleRole = isSuper ? "SHOP_OWNER" : "STAFF";
+    const people = await prisma.user.findMany({
+      where: { role: peopleRole, deletedAt: null, ...(scopeShopId ? { shopId: scopeShopId } : { shopId: { not: null } }) } as any,
+      select: { id: true, name: true, role: true, isActive: true, shopId: true, shop: { select: { id: true, name: true } } },
+      orderBy: { name: "asc" },
+    });
+    const staff = (people as any[]).map((p) => {
+      // Owner rows reflect their whole shop (super view); staff rows reflect personal billing
+      const mine = p.role === "SHOP_OWNER"
+        ? orders.filter((o) => (o as any).shopId && (o as any).shopId === p.shopId)
+        : orders.filter((o) => (o as any).userId === p.id);
+      const revenue = mine.reduce((s, o) => s + Number((o as any).total ?? 0), 0);
+      const units = mine.reduce((s, o) => s + ((o as any).items ?? []).reduce((a: number, it: any) => a + (Number(it.quantity) || 0), 0), 0);
+      const discount = mine.reduce((s, o) => s + Number((o as any).discount ?? 0), 0);
+      return {
+        id: p.id, name: p.name, role: p.role, isActive: p.isActive,
+        shopId: p.shopId, shopName: (p as any).shop?.name ?? null,
+        orders: mine.length,
+        revenue: Number(revenue.toFixed(2)),
+        avgBill: mine.length ? Number((revenue / mine.length).toFixed(2)) : 0,
+        units,
+        discount: Number(discount.toFixed(2)),
+      };
+    });
+
+    // ---- Customers (scoped via shop orders; Customer has no shopId) ----
+    const idRows = await prisma.order.findMany({
+      where: { deletedAt: null, createdAt: { lte: end }, ...shopFilter } as any,
+      select: { customerId: true },
+    });
+    const scopedIds = Array.from(new Set(idRows.map((r) => r.customerId).filter(Boolean))) as string[];
+    const scopedCustomers = scopedIds.length
+      ? await prisma.customer.findMany({
+          where: { id: { in: scopedIds }, deletedAt: null },
+          select: { id: true, name: true, phone: true, totalSpent: true, totalOrders: true, balance: true, firstOrderAt: true, createdAt: true, lastOrderAt: true },
+        })
+      : [];
+    const byId = new Map((scopedCustomers as any[]).map((x) => [x.id, x]));
+    const activeIds = Array.from(new Set(orders.map((o) => o.customerId).filter(Boolean))) as string[];
+    const startMs = start.getTime();
+    const endMs = end.getTime();
+    const firstTs = (x: any) => {
+      const d = x.firstOrderAt ?? x.createdAt;
+      const t = d ? new Date(d).getTime() : NaN;
+      return t;
+    };
+    const newCount = (scopedCustomers as any[]).filter((x) => {
+      const t = firstTs(x);
+      return !isNaN(t) && t >= startMs && t <= endMs;
+    }).length;
+    const activeCount = activeIds.length;
+    const repeatCount = activeIds.filter((id) => Number(byId.get(id)?.totalOrders ?? 0) > 1).length;
+    const retentionPct = activeCount ? Number(((repeatCount / activeCount) * 100).toFixed(1)) : 0;
+    const avgCustomerValue = activeCount ? Number((rangeRevenue / activeCount).toFixed(2)) : 0;
+    const top = [...(scopedCustomers as any[])]
+      .sort((a, b) => Number(b.totalSpent ?? 0) - Number(a.totalSpent ?? 0))
+      .slice(0, 10)
+      .map((x) => ({ id: x.id, name: x.name, phone: x.phone, totalSpent: Number(Number(x.totalSpent ?? 0).toFixed(2)), totalOrders: x.totalOrders ?? 0, balance: Number(Number(x.balance ?? 0).toFixed(2)) }));
+    const defaulters = [...(scopedCustomers as any[])]
+      .filter((x) => Number(x.balance ?? 0) > 0)
+      .sort((a, b) => Number(b.balance ?? 0) - Number(a.balance ?? 0))
+      .slice(0, 8)
+      .map((x) => ({ id: x.id, name: x.name, phone: x.phone, balance: Number(Number(x.balance ?? 0).toFixed(2)), totalOrders: x.totalOrders ?? 0 }));
+
+    // ---- Shops (super) or counters (shop-level) ----
+    let shops: any[] | null = null;
+    let counters: any[] | null = null;
+    if (isSuper) {
+      const shopList = await prisma.shop.findMany({
+        where: { deletedAt: null, ...(scopeShopId ? { id: scopeShopId } : {}) },
+        select: { id: true, name: true, isActive: true },
+        orderBy: { name: "asc" },
+      });
+      const perShop = await Promise.all(
+        (shopList as any[]).map(async (s) => {
+          const so = await prisma.order.findMany({
+            where: { shopId: s.id, createdAt: { gte: start, lte: end }, deletedAt: null },
+            select: { total: true },
+          });
+          const revenue = so.reduce((a, o) => a + Number((o as any).total ?? 0), 0);
+          return { id: s.id, name: s.name, isActive: (s as any).isActive, orders: so.length, revenue: Number(revenue.toFixed(2)), avgBill: so.length ? Number((revenue / so.length).toFixed(2)) : 0 };
+        })
+      );
+      shops = perShop;
+    } else if (scopeShopId) {
+      const counterList = await prisma.counter.findMany({
+        where: { shopId: scopeShopId, deletedAt: null },
+        select: { id: true, name: true, isActive: true },
+        orderBy: { name: "asc" },
+      });
+      counters = (counterList as any[]).map((ct) => {
+        const mine = orders.filter((o) => (o as any).counterId === ct.id);
+        const revenue = mine.reduce((s, o) => s + Number((o as any).total ?? 0), 0);
+        return { id: ct.id, name: ct.name, isActive: ct.isActive, orders: mine.length, revenue: Number(revenue.toFixed(2)), avgBill: mine.length ? Number((revenue / mine.length).toFixed(2)) : 0 };
+      });
+    }
+
+    const result = {
+      range: { preset: bounds.preset, label, start: bounds.start.toISOString(), end: bounds.end.toISOString() },
+      scope: { shopId: scopeShopId, role: user.role, staffRole: peopleRole },
+      staff,
+      customers: { newCount, activeCount, repeatCount, retentionPct, avgCustomerValue, top, defaulters },
+      shops,
+      counters,
+    };
+    setCached(ck, result);
+    return c.json(result);
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : "Failed to fetch breakdowns" }, 500);
   }
 });
 
