@@ -36,6 +36,6 @@ export function verifyRefreshToken(token: string): Pick<JwtPayload, "userId" | "
   return jwt.verify(token, config.jwtRefreshSecret) as any;
 }
 
-export function sanitizeUser(u: { id: string; shopId: string | null; email: string; name: string; role: string; isActive?: boolean; shop?: { id: string; name: string } | null }) {
-  return { id: u.id, shopId: u.shopId, email: u.email, name: u.name, role: u.role, shop: (u as any).shop ?? null };
+export function sanitizeUser(u: { id: string; shopId: string | null; email: string; name: string; role: string; isActive?: boolean; canManageInventory?: boolean; shop?: { id: string; name: string } | null }) {
+  return { id: u.id, shopId: u.shopId, email: u.email, name: u.name, role: u.role, canManageInventory: Boolean((u as any).canManageInventory), shop: (u as any).shop ?? null };
 }

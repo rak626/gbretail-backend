@@ -13,7 +13,20 @@ shops.get("/", async (c) => {
   try {
     if (user.role === "SUPER_ADMIN") {
       const items = await prisma.shop.findMany({ where: { deletedAt: null }, orderBy: { createdAt: "desc" } });
-      return c.json({ shops: items });
+      // Per-shop console meta (super only): owner, staff/product counts, last bill.
+      // Additive fields — list shape stays { shops: [...] }.
+      const enriched = await Promise.all(
+        (items as any[]).map(async (s) => {
+          const [owner, staffCount, productCount, lastOrder] = await Promise.all([
+            prisma.user.findFirst({ where: { shopId: s.id, role: "SHOP_OWNER", deletedAt: null }, select: { id: true, name: true, email: true, isActive: true } }),
+            prisma.user.count({ where: { shopId: s.id, role: "STAFF", deletedAt: null } }),
+            prisma.product.count({ where: { shopId: s.id, deletedAt: null } as any }),
+            prisma.order.findFirst({ where: { shopId: s.id, deletedAt: null } as any, orderBy: { createdAt: "desc" }, select: { createdAt: true } as any }),
+          ]);
+          return { ...s, owner: owner ?? null, staffCount, productCount, lastOrderAt: (lastOrder as any)?.createdAt ?? null };
+        })
+      );
+      return c.json({ shops: enriched });
     }
     // Shop owner/staff: return own shop
     if (!user.shopId) return c.json({ shops: [] });

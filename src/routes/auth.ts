@@ -16,9 +16,15 @@ auth.post("/login", async (c) => {
 
     if (!email || !password) return c.json({ error: "Email and password required" }, 400);
 
-    const user = await prisma.user.findUnique({ where: { email }, include: { shop: { select: { id: true, name: true } } } });
+    const user = await prisma.user.findUnique({ where: { email }, include: { shop: { select: { id: true, name: true, isActive: true, deletedAt: true } } } });
     if (!user || (user as any).deletedAt) return c.json({ error: "Invalid credentials" }, 401);
     if (!(user as any).isActive) return c.json({ error: "Account disabled" }, 403);
+    // Deactivated shop blocks its staff/owner at login (super admin unaffected).
+    // Login-only enforcement: unexpired tokens keep working until expiry/refresh.
+    if ((user as any).role !== "SUPER_ADMIN" && (user as any).shopId) {
+      const sh = (user as any).shop;
+      if (!sh || (sh as any).deletedAt || !(sh as any).isActive) return c.json({ error: "Shop disabled" }, 403);
+    }
 
     const ok = await verifyPassword(password, (user as any).passwordHash);
     if (!ok) return c.json({ error: "Invalid credentials" }, 401);

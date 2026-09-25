@@ -1,5 +1,6 @@
 import type { Context, Next } from "hono";
 import { verifyAccessToken, type JwtPayload } from "../lib/auth.js";
+import { prisma } from "../lib/prisma.js";
 
 export type AuthEnv = {
   Variables: {
@@ -34,6 +35,12 @@ export async function requireAuth(c: Context, next: Next) {
   try {
     const payload = verifyAccessToken(token);
     if (!payload?.userId || !payload?.role) throw new Error("Invalid payload");
+    // Deactivation takes effect immediately — a disabled/deleted account
+    // cannot keep using an unexpired token. Single indexed PK lookup.
+    const row = await prisma.user.findUnique({ where: { id: payload.userId }, select: { isActive: true, deletedAt: true } as any });
+    if (!row || (row as any).deletedAt || !(row as any).isActive) {
+      return c.json({ error: "Account disabled", code: "ACCOUNT_DISABLED" }, 403);
+    }
     (c as any).set("user", payload);
     (c as any).set("shopId", payload.shopId ?? null);
     (c as any).set("userId", payload.userId);
