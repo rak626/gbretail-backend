@@ -14,6 +14,12 @@ model Shop {
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
+  // Receipt config (per-shop billing identity; NULL falls back to name/""/omitted).
+  receiptName   String?
+  gstin         String?
+  upiId         String?
+  phone         String?
+  receiptFooter String?
   counters  Counter[]
   users     User[]
   products  Product[]

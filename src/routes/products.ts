@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { Prisma } from "@prisma/client";
 import { prisma } from "../lib/prisma.js";
 import { requireAuth } from "../middleware/auth.js";
 import { parseMoney, MAX_MONEY } from "../lib/money.js";
@@ -20,12 +21,14 @@ async function staffInventoryDenied(c: unknown): Promise<boolean> {
   }
 }
 
-// GET /api/products?search&category&limit&shopId
+// GET /api/products?search&category&limit&page&shopId
 products.get("/", async (c) => {
   const search = (c.req.query("search") ?? "").toLowerCase();
   const category = c.req.query("category") ?? "All";
   const rawLimit = parseInt(c.req.query("limit") ?? "100", 10);
-  const limit = isNaN(rawLimit) ? 100 : rawLimit;
+  const limit = isNaN(rawLimit) ? 100 : Math.min(Math.max(rawLimit, 1), 200);
+  const rawPage = parseInt(c.req.query("page") ?? "1", 10);
+  const page = isNaN(rawPage) ? 1 : Math.max(rawPage, 1);
   const user = (c as any).get("user" as any) as any;
   const shopId = ((c as any).get("shopId" as any) as string | null) || c.req.query("shopId") || user?.shopId || null;
 
@@ -50,17 +53,47 @@ products.get("/", async (c) => {
       }
     }
 
-    const items = await prisma.product.findMany({
-      where,
-      orderBy: { name: "asc" },
-      take: Math.min(limit, 200),
-    });
+    const [items, total] = await Promise.all([
+      prisma.product.findMany({
+        where,
+        orderBy: { name: "asc" },
+        take: limit,
+        skip: (page - 1) * limit,
+      }),
+      prisma.product.count({ where }),
+    ]);
 
-    return c.json({ products: items, source: "db" });
+    return c.json({ products: items, total, page, limit, source: "db" });
   } catch (e) {
     // No hardcoded fallback: catalog is shop data and must come from the DB.
     // A failure here is honest (offline clients use their cached catalog).
     return c.json({ error: "Failed to load products" }, 500);
+  }
+});
+
+// GET /api/products/meta — shop-wide totals + categories (must be before /:id).
+// Header KPIs must not depend on table pagination; low/out compare per-row
+// stockQuantity against that row's own lowStockThreshold.
+products.get("/meta", async (c) => {
+  const user = (c as any).get("user" as any) as any;
+  const shopId = ((c as any).get("shopId" as any) as string | null) || c.req.query("shopId") || user?.shopId || null;
+  try {
+    if (!shopId && user?.role !== "SUPER_ADMIN") return c.json({ error: "Shop not assigned — contact admin", code: "NO_SHOP" }, 403);
+    const conds: Prisma.Sql[] = [Prisma.sql`"deletedAt" IS NULL`];
+    if (shopId) conds.push(Prisma.sql`"shopId" = ${shopId}`);
+    const rows = await prisma.$queryRaw<Array<{ total: number; low: number; out: number }>>(
+      Prisma.sql`SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE "stockQuantity" <= "lowStockThreshold")::int AS low, COUNT(*) FILTER (WHERE "stockQuantity" <= 0)::int AS out FROM "Product" WHERE ${Prisma.join(conds, " AND ")}`
+    );
+    const cats = await prisma.product.findMany({
+      where: { deletedAt: null, ...(shopId ? { shopId } : {}) } as any,
+      select: { category: true },
+      distinct: ["category"],
+      orderBy: { category: "asc" },
+    });
+    const agg = rows[0] ?? { total: 0, low: 0, out: 0 };
+    return c.json({ total: agg.total, low: agg.low, out: agg.out, categories: cats.map((r) => r.category) });
+  } catch (e) {
+    return c.json({ error: "Failed to load product stats", total: 0, low: 0, out: 0, categories: [] }, 500);
   }
 });
 

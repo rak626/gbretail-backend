@@ -4,6 +4,31 @@ import { requireAuth, requireRole } from "../middleware/auth.js";
 
 const shops = new Hono();
 
+// Receipt identity fields (per-shop billing header). Shared by POST + PATCH.
+// Returns the validated partial, or an error string. `partial` skips absent keys.
+function receiptFields(body: Record<string, unknown>, partial = false): Record<string, unknown> | string {
+  const out: Record<string, unknown> = {};
+  const str = (v: unknown, max: number) => (v == null || String(v).trim() === "" ? null : String(v).trim().slice(0, max));
+  if (!partial || body.receiptName !== undefined) out.receiptName = str(body.receiptName, 100);
+  if (!partial || body.gstin !== undefined) {
+    const g = str(body.gstin, 20);
+    if (g && !/^[0-9A-Z]{15}$/i.test(g)) return "Invalid GSTIN (15 alphanumeric chars)";
+    out.gstin = g ? g.toUpperCase() : null;
+  }
+  if (!partial || body.upiId !== undefined) {
+    const u = str(body.upiId, 100);
+    if (u && !/^[\w.\-]{2,}@[a-zA-Z]{2,}$/.test(u)) return "Invalid UPI id (format name@bank)";
+    out.upiId = u;
+  }
+  if (!partial || body.phone !== undefined) {
+    const p = body.phone != null && String(body.phone).trim() !== "" ? String(body.phone).replace(/\D/g, "").slice(-10) : null;
+    if (body.phone != null && String(body.phone).trim() !== "" && (!p || !/^\d{10}$/.test(p))) return "Invalid shop phone (10 digits)";
+    out.phone = p;
+  }
+  if (!partial || body.receiptFooter !== undefined) out.receiptFooter = str(body.receiptFooter, 200);
+  return out;
+}
+
 // All shop routes require auth; creation only SUPER_ADMIN, listing depends on role
 shops.use("*", requireAuth as any);
 
@@ -61,7 +86,9 @@ shops.post("/", requireRole("SUPER_ADMIN") as any, async (c) => {
     const address = body.address ? String(body.address).trim().slice(0, 500) : null;
     if (!name) return c.json({ error: "Shop name required" }, 400);
     if (name.length > 100) return c.json({ error: "Name too long" }, 400);
-    const shop = await prisma.shop.create({ data: { name, address } });
+    const receipt = receiptFields(body);
+    if (typeof receipt === "string") return c.json({ error: receipt }, 400);
+    const shop = await prisma.shop.create({ data: { name, address, ...receipt } });
     return c.json({ shop }, 201);
   } catch (e) {
     return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);
@@ -84,6 +111,9 @@ shops.patch("/:id", async (c) => {
     }
     if (body.address !== undefined) data.address = body.address ? String(body.address).trim().slice(0, 500) : null;
     if (body.isActive !== undefined) data.isActive = Boolean(body.isActive);
+    const receipt = receiptFields(body, true);
+    if (typeof receipt === "string") return c.json({ error: receipt }, 400);
+    Object.assign(data, receipt);
     if (Object.keys(data).length === 0) return c.json({ error: "No valid fields" }, 400);
     const shop = await prisma.shop.update({ where: { id }, data });
     return c.json({ shop });

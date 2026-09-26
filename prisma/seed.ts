@@ -42,6 +42,12 @@ async function main() {
   });
   console.log(`[SEED] Shop: ${defaultShop.id} — ${defaultShop.name}`);
 
+  // Backfill legacy receipt identity once (never clobber owner edits on reseed)
+  await prisma.shop.updateMany({
+    where: { id: defaultShop.id, receiptName: null },
+    data: { receiptName: "GB Retail", gstin: "07ABCDE1234F1Z5", upiId: "store@upi", receiptFooter: "Thank you, visit again" },
+  });
+
   // Counters
   const counter1 = await prisma.counter.upsert({
     where: { id: "counter_1" },
