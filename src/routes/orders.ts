@@ -60,16 +60,21 @@ orders.get("/next-number", async (c) => {
   }
 });
 
-// GET /api/orders?page&limit&customerId&paymentMethod&search&date
+// GET /api/orders?page&limit&customerId&paymentMethod&search&customer&date&from&to
+// search = order number (kept backward-compat), customer = customer name/phone,
+// date = single day (legacy), from/to = YYYY-MM-DD range (preferred)
 orders.get("/", async (c) => {
   const rawLimit = parseInt(c.req.query("limit") ?? "50", 10);
   const limit = isNaN(rawLimit) ? 50 : Math.min(rawLimit, 100);
   const rawPage = parseInt(c.req.query("page") ?? "1", 10);
   const page = isNaN(rawPage) ? 1 : Math.max(rawPage, 1);
   const customerId = c.req.query("customerId");
-  const paymentMethod = c.req.query("paymentMethod");
+  const paymentMethod = (c.req.query("paymentMethod") ?? "").trim();
   const search = (c.req.query("search") ?? "").trim();
+  const customerQ = (c.req.query("customer") ?? "").trim();
   const date = c.req.query("date");
+  const from = (c.req.query("from") ?? "").trim();
+  const to = (c.req.query("to") ?? "").trim();
   const { user, shopId } = getShopScope(c);
 
   try {
@@ -78,14 +83,34 @@ orders.get("/", async (c) => {
     else if (user.role !== "SUPER_ADMIN") return c.json({ error: "Shop not assigned" }, 403);
     // super admin without shopId can see all, but filter by query shopId if provided
     if (customerId) where.customerId = customerId;
-    if (paymentMethod) where.paymentMethod = paymentMethod;
+    if (paymentMethod && ["cash", "upi", "khata", "split"].includes(paymentMethod.toLowerCase())) {
+      where.paymentMethod = paymentMethod.toLowerCase();
+    }
     if (search) where.orderNumber = { contains: search, mode: "insensitive" as const };
-    if (date) {
+    if (customerQ) {
+      (where as any).customer = {
+        OR: [
+          { name: { contains: customerQ, mode: "insensitive" as const } },
+          { phone: { contains: customerQ } },
+        ],
+      };
+    }
+    if (from || to) {
+      const start = from ? new Date(from) : new Date(to as string);
+      start.setHours(0, 0, 0, 0);
+      const end = to ? new Date(to) : new Date(from as string);
+      end.setHours(23, 59, 59, 999);
+      if (!isNaN(start.getTime()) && !isNaN(end.getTime()) && start <= end) {
+        where.createdAt = { gte: start, lte: end };
+      }
+    } else if (date) {
       const start = new Date(date);
       start.setHours(0, 0, 0, 0);
       const end = new Date(date);
       end.setHours(23, 59, 59, 999);
-      where.createdAt = { gte: start, lte: end };
+      if (!isNaN(start.getTime()) && !isNaN(end.getTime())) {
+        where.createdAt = { gte: start, lte: end };
+      }
     }
     // optional counter filter
     const counterIdQ = c.req.query("counterId");
