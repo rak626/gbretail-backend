@@ -8,11 +8,15 @@ health.get("/", async (c) => {
     await prisma.$queryRaw`SELECT 1`;
     return c.json({ status: "ok", db: "connected", timestamp: new Date().toISOString() });
   } catch (e) {
+    // Sanitize — never leak connect strings / driver internals (see lib/errors.ts).
+    const { toAppError } = await import("../lib/errors.js");
+    const appErr = toAppError(e);
     return c.json(
       {
         status: "error",
         db: "disconnected",
-        error: e instanceof Error ? e.message : "unknown",
+        error: appErr.message,
+        code: appErr.code,
         timestamp: new Date().toISOString(),
       },
       503

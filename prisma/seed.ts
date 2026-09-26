@@ -27,7 +27,8 @@ function createPrisma() {
 const prisma = createPrisma();
 
 async function hash(pw: string) {
-  const salt = await bcrypt.genSalt(10);
+  const rounds = parseInt(process.env.BCRYPT_ROUNDS ?? "10", 10) || 10;
+  const salt = await bcrypt.genSalt(rounds);
   return bcrypt.hash(pw, salt);
 }
 
@@ -102,6 +103,7 @@ async function main() {
     const cost = sell ? Math.round(sell * 0.78 * 100) / 100 : 0;
     const unit = (p as any).unit ?? "pcs";
     const lowStockThreshold = (p as any).lowStockThreshold ?? 10;
+    // Never clobber live stock on reseed — only set stockQuantity on create.
     await prisma.product.upsert({
       where: { id: p.id },
       update: {
@@ -117,7 +119,6 @@ async function main() {
         lowStockThreshold,
         preset_weights: (p as any).preset_weights ?? [],
         preset_prices: (p as any).preset_prices ?? [],
-        stockQuantity: 100,
         deletedAt: null,
       },
       create: {

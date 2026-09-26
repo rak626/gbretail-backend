@@ -6,13 +6,15 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "dev:edge": "wrangler dev --port 8787",
-    "build": "tsc",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.check.json",
     "start": "node dist/index.js",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
     "db:seed": "tsx prisma/seed.ts",
-    "db:push": "prisma db push"
+    "db:push": "prisma db push",
+    "db:backfill": "tsx scripts/backfill.ts"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.7",

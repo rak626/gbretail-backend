@@ -4,6 +4,7 @@ import { prisma } from "../lib/prisma.js";
 import { verifyPassword, signAccessToken, signRefreshToken, verifyRefreshToken, verifyAccessToken, sanitizeUser } from "../lib/auth.js";
 import { resolveStaffCounter } from "../lib/staffCounter.js";
 import { requireAuth } from "../middleware/auth.js";
+import { config } from "../config.js";
 
 const auth = new Hono();
 
@@ -67,7 +68,7 @@ auth.post("/login", async (c) => {
     const refreshToken = signRefreshToken({ userId: user.id, shopId: (user as any).shopId ?? null, role: (user as any).role, tv: (user as any).tokenVersion ?? 0 });
 
     // Set httpOnly cookies for refresh + optional access fallback
-    const isProduction = process.env.NODE_ENV === "production";
+    const isProduction = config.isProduction;
     setCookie(c, "refreshToken", refreshToken, {
       httpOnly: true,
       secure: isProduction,
@@ -130,7 +131,7 @@ auth.post("/refresh", async (c) => {
     const accessToken = signAccessToken(payload as any);
     const newRefresh = signRefreshToken({ userId: user.id, shopId: (user as any).shopId ?? null, role: (user as any).role, tv: (user as any).tokenVersion ?? 0 });
 
-    const isProduction = process.env.NODE_ENV === "production";
+    const isProduction = config.isProduction;
     setCookie(c, "refreshToken", newRefresh, {
       httpOnly: true,
       secure: isProduction,
@@ -154,8 +155,34 @@ auth.post("/refresh", async (c) => {
   }
 });
 
-// POST /api/auth/logout
+// POST /api/auth/logout — bumps tokenVersion to revoke stolen access tokens immediately.
 auth.post("/logout", async (c) => {
+  try {
+    const authHeader = c.req.header("authorization") || c.req.header("Authorization") || "";
+    let token: string | null = null;
+    if (authHeader) {
+      const parts = authHeader.split(" ");
+      if (parts.length === 2) token = parts[1];
+    }
+    if (!token) {
+      const cookie = c.req.header("cookie") || "";
+      const m = cookie.match(/(?:^|;\s*)accessToken=([^;]+)/);
+      if (m) token = decodeURIComponent(m[1]);
+    }
+    if (token) {
+      try {
+        const p = verifyAccessToken(token);
+        await prisma.user.update({
+          where: { id: (p as any).userId },
+          data: { tokenVersion: { increment: 1 } },
+        });
+      } catch {
+        // Invalid/expired token — still clear cookies below.
+      }
+    }
+  } catch {
+    // never block logout on DB errors
+  }
   deleteCookie(c, "refreshToken", { path: "/" });
   deleteCookie(c, "accessToken", { path: "/" });
   return c.json({ success: true });

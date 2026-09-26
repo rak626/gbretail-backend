@@ -19,18 +19,36 @@ import users from "./routes/users.js";
 export function createApp() {
   const app = new Hono();
 
+  // Workers bindings (c.env) -> config overrides, per request.
+  app.use("*", async (c, next) => {
+    try {
+      const { applyEnv } = await import("./config.js");
+      applyEnv((c.env ?? {}) as Record<string, string | undefined>);
+    } catch {
+      // Node: c.env empty — process.env already used.
+    }
+    await next();
+  });
+
   // Global middleware — logger only in non-production to avoid verbose PII
   if (!config.isProduction) app.use("*", logger());
 
-  const origins = config.corsOrigins;
-  validateCorsOrigins(origins);
+  validateCorsOrigins(config.corsOrigins);
 
   app.use(
     "*",
     cors({
-      origin: origins,
-      allowHeaders: ["Content-Type", "Authorization"],
+      // Read origins per-request so Workers [vars] changes apply without restart.
+      origin: (origin, c) => {
+        const allowed = config.corsOrigins;
+        if (allowed.includes("*")) return null;
+        if (!origin) return allowed[0] ?? null;
+        return allowed.includes(origin) ? origin : null;
+      },
+      allowHeaders: ["Content-Type", "Authorization", "X-Shop-Id", "Idempotency-Key"],
       allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+      exposeHeaders: ["Content-Disposition"],
+      maxAge: 600,
       credentials: true,
     })
   );

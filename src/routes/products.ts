@@ -48,7 +48,7 @@ products.get("/", async (c) => {
     if (search) {
       where.OR = [
         { name: { contains: search, mode: "insensitive" as const } },
-        { barcode: { contains: search } },
+        { barcode: { contains: search, mode: "insensitive" as const } },
       ];
     }
     if (category && category !== "All") {
@@ -249,11 +249,9 @@ products.post("/", async (c) => {
     return c.json({ product }, 201);
   } catch (e) {
     console.error("[POST /products]", e);
-    const msg = e instanceof Error ? e.message : "Failed to create product";
-    if (msg.includes("DATABASE_URL") || msg.includes("connect")) {
-      return c.json({ error: "Database not configured. Set DATABASE_URL" }, 503);
-    }
-    return c.json({ error: msg }, 500);
+    const { toAppError } = await import("../lib/errors.js");
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 404 | 409 | 500 | 503);
   }
 });
 

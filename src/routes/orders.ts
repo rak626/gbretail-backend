@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { prisma } from "../lib/prisma.js";
-import { computeDueDate, generateOrderNumber, getNextOrderNumber } from "../lib/utils.js";
+import { computeDueDate, generateOrderNumber } from "../lib/utils.js";
 import { normalizePhone } from "../lib/normalize.js";
 import { toAppError, AppError } from "../lib/errors.js";
 import { requireAuth } from "../middleware/auth.js";
@@ -19,7 +19,8 @@ function getShopScope(c: any) {
   return { user, shopId };
 }
 
-// Per-shop next number: count orders in shop today, with shop suffix to keep global unique + random tail for concurrency
+// Per-shop next number: count orders in shop today, with shop suffix to keep global unique + random tail for concurrency.
+// NOTE: count+1 is inherently racy — callers must retry on P2002 (see POST / below).
 async function getNextShopOrderNumber(tx: any, shopId: string | null) {
   if (!shopId) return generateOrderNumber();
   const today = new Date();
@@ -36,6 +37,8 @@ async function getNextShopOrderNumber(tx: any, shopId: string | null) {
 }
 
 // GET /api/orders/next-number (must be before /:id)
+// Preview only — actual orderNumber includes a random tail and may differ.
+// Do not use for idempotency; POST / returns the authoritative number.
 orders.get("/next-number", async (c) => {
   const { user, shopId } = getShopScope(c);
   try {
@@ -51,7 +54,7 @@ orders.get("/next-number", async (c) => {
     const seq = String(count + 1).padStart(3, "0");
     const shopShort = shopId ? shopId.slice(-4).toUpperCase() : "";
     const orderNumber = shopId ? `ORD-${yyyy}${mm}${dd}-${shopShort}-${seq}` : `ORD-${yyyy}${mm}${dd}-${seq}`;
-    return c.json({ orderNumber, count });
+    return c.json({ orderNumber, preview: true, count });
   } catch {
     const d = new Date();
     const yyyy = d.getFullYear();
@@ -288,8 +291,15 @@ orders.post("/", async (c) => {
 
     // Use transaction to ensure atomicity: customer updates + order + ledger + stock
     // lowStockWarnings is informational only — sales are never blocked (warn-only)
+    // count+1 order numbers are racy — retry the whole tx on orderNumber P2002.
     const lowStockWarnings: Array<{ productId: string; name: string; stockQuantity: number; lowStockThreshold: number; unit: string }> = [];
-    const order = await prisma.$transaction(async (tx) => {
+    let order: unknown = null;
+    let orderNumberConflict: unknown = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      lowStockWarnings.length = 0;
+      orderNumberConflict = null;
+      try {
+        order = await prisma.$transaction(async (tx) => {
       // Order number per shop with retry on conflict
       let orderNumber: string;
       try {
@@ -349,24 +359,18 @@ orders.post("/", async (c) => {
         if ((existing as any).shopId !== shopId && user.role !== "SUPER_ADMIN") {
           throw new AppError(403, "Customer belongs to another shop");
         }
-        if (existing) {
-          const isFirst = !existing?.firstOrderAt;
-          await tx.customer.update({
-            where: { id: resolvedCustomerId },
-            data: {
-              totalSpent: { increment: total },
-              totalOrders: { increment: 1 },
-              lastOrderAt: now,
-              ...(isFirst ? { firstOrderAt: now } : {}),
-              ...(existing?.deletedAt ? { deletedAt: null } : {}),
-              ...(paymentMethod === "khata" ? { balance: { increment: total } } : {}),
-            },
-          });
-        }
-      } else if (customerId) {
-        // customerId provided but not found? allow walk-in
-        const exists = await tx.customer.findUnique({ where: { id: String(customerId) } });
-        if (!exists) resolvedCustomerId = null;
+        const isFirst = !existing?.firstOrderAt;
+        await tx.customer.update({
+          where: { id: resolvedCustomerId },
+          data: {
+            totalSpent: { increment: total },
+            totalOrders: { increment: 1 },
+            lastOrderAt: now,
+            ...(isFirst ? { firstOrderAt: now } : {}),
+            ...(existing?.deletedAt ? { deletedAt: null } : {}),
+            ...(paymentMethod === "khata" ? { balance: { increment: total } } : {}),
+          },
+        });
       }
 
       // Resolve costPrice from DB — never trust client cost (profit manipulation).
@@ -470,7 +474,24 @@ orders.post("/", async (c) => {
       }
 
       return createdOrder;
-    });
+        });
+        break;
+      } catch (txErr) {
+        const msg = txErr instanceof Error ? txErr.message : "";
+        const isOrderNumberConflict =
+          (msg.includes("P2002") || msg.includes("Unique constraint")) &&
+          (msg.includes("orderNumber") || msg.includes("Order_orderNumber"));
+        // Idempotency conflicts bubble to the outer handler (returns winner).
+        // Order-number races retry with a fresh random tail.
+        if (!isOrderNumberConflict) throw txErr;
+        orderNumberConflict = txErr;
+        continue;
+      }
+    }
+    if (!order) {
+      if (orderNumberConflict) throw orderNumberConflict;
+      throw new AppError(500, "Failed to create order");
+    }
 
     return c.json({ order, lowStockWarnings }, 201);
   } catch (e) {

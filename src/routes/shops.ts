@@ -120,7 +120,14 @@ shops.patch("/:id", async (c) => {
       data.name = n;
     }
     if (body.address !== undefined) data.address = body.address ? String(body.address).trim().slice(0, 500) : null;
-    if (body.isActive !== undefined) data.isActive = Boolean(body.isActive);
+    if (body.isActive !== undefined) {
+      // Prevent self-lockout: SHOP_OWNER cannot deactivate their own shop.
+      // Only SUPER_ADMIN can toggle isActive (staff/owner get 403 SHOP_DISABLED otherwise).
+      if (user.role !== "SUPER_ADMIN") {
+        return c.json({ error: "Forbidden — only admin can deactivate a shop", code: "FORBIDDEN" }, 403);
+      }
+      data.isActive = Boolean(body.isActive);
+    }
     const receipt = receiptFields(body, true);
     if (typeof receipt === "string") return c.json({ error: receipt }, 400);
     Object.assign(data, receipt);

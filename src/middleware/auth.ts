@@ -55,7 +55,15 @@ export async function requireAuth(c: Context, next: Next) {
       }
     }
     (c as any).set("user", payload);
-    (c as any).set("shopId", payload.shopId ?? null);
+    // SUPER_ADMIN shop impersonation via x-shop-id header (previously only in
+    // unenforced enforceShopScope). Merged here so it works on every route
+    // without per-router mounting.
+    let shopId: string | null = payload.shopId ?? null;
+    if (payload.role === "SUPER_ADMIN") {
+      const headerShop = c.req.header("x-shop-id") || c.req.header("X-Shop-Id");
+      if (headerShop) shopId = headerShop;
+    }
+    (c as any).set("shopId", shopId);
     (c as any).set("userId", payload.userId);
     (c as any).set("role", payload.role);
     await next();
