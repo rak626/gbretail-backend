@@ -19,6 +19,7 @@ model Shop {
   products  Product[]
   orders    Order[]
   ledgerEntries LedgerEntry[]
+  customers Customer[]
 
   @@index([name])
   @@index([deletedAt])
@@ -100,8 +101,10 @@ model Product {
 
 model Customer {
   id            String        @id @default(cuid())
+  shopId        String
+  shop          Shop          @relation(fields: [shopId], references: [id], onDelete: Cascade)
   name          String
-  phone         String?       @unique
+  phone         String?
   email         String?
   address       String?
   notes         String?
@@ -117,6 +120,10 @@ model Customer {
   orders        Order[]
   ledgerEntries LedgerEntry[]
 
+  @@unique([shopId, phone])
+  @@index([shopId])
+  @@index([shopId, deletedAt])
+  @@index([shopId, balance])
   @@index([name])
   @@index([phone])
   @@index([deletedAt])

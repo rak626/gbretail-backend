@@ -231,7 +231,7 @@ orders.post("/", async (c) => {
         const phone = normalizePhone(customerPhone);
         const name = customerName ? String(customerName).trim() : "Walk-in Customer";
         if (phone) {
-          const existing = await tx.customer.findUnique({ where: { phone } });
+          const existing = await tx.customer.findFirst({ where: { shopId: shopId!, phone } });
           if (existing) {
             resolvedCustomerId = existing.id;
             const isFirst = !(existing as { firstOrderAt?: Date | null }).firstOrderAt;
@@ -249,6 +249,7 @@ orders.post("/", async (c) => {
           } else {
             const cust = await tx.customer.create({
               data: {
+                shopId: shopId!,
                 name,
                 phone,
                 balance: total,
@@ -262,12 +263,18 @@ orders.post("/", async (c) => {
           }
         } else if (name && name !== "Walk-in Customer") {
           const cust = await tx.customer.create({
-            data: { name, balance: total, totalSpent: total, totalOrders: 1, firstOrderAt: now, lastOrderAt: now },
+            data: { shopId: shopId!, name, balance: total, totalSpent: total, totalOrders: 1, firstOrderAt: now, lastOrderAt: now },
           });
           resolvedCustomerId = cust.id;
         }
       } else if (resolvedCustomerId) {
-        const existing = await tx.customer.findUnique({ where: { id: resolvedCustomerId }, select: { firstOrderAt: true, deletedAt: true } });
+        const existing = await tx.customer.findUnique({ where: { id: resolvedCustomerId }, select: { firstOrderAt: true, deletedAt: true, shopId: true } });
+        if (!existing) {
+          throw new AppError(404, "Customer not found");
+        }
+        if ((existing as any).shopId !== shopId && user.role !== "SUPER_ADMIN") {
+          throw new AppError(403, "Customer belongs to another shop");
+        }
         if (existing) {
           const isFirst = !existing?.firstOrderAt;
           await tx.customer.update({
@@ -282,8 +289,6 @@ orders.post("/", async (c) => {
             },
           });
         }
-      } else if (resolvedCustomerId) {
-        // fallback already handled
       } else if (customerId) {
         // customerId provided but not found? allow walk-in
         const exists = await tx.customer.findUnique({ where: { id: String(customerId) } });

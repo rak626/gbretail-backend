@@ -23,7 +23,7 @@ stats.get("/", async (c) => {
       prisma.order.findMany({ where: { createdAt: { gte: todayStart, lte: todayEnd }, deletedAt: null, ...shopFilter } as any, select: { total: true, paymentMethod: true } }),
       prisma.order.count({ where: { deletedAt: null, ...shopFilter } as any }),
       prisma.order.aggregate({ where: { deletedAt: null, ...shopFilter } as any, _sum: { total: true } }),
-      prisma.customer.count({ where: { deletedAt: null } }),
+      prisma.customer.count({ where: { deletedAt: null, ...shopFilter } }),
       prisma.product.findMany({ where: { deletedAt: null, ...(shopId ? { shopId } : {}) } as any, select: { id: true, name: true, stockQuantity: true, lowStockThreshold: true, unit: true, shopId: true }, orderBy: { stockQuantity: "asc" }, take: 100 }),
     ]);
 

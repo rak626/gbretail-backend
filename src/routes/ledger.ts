@@ -41,6 +41,7 @@ ledger.get("/due-today", async (c) => {
     if (q) {
       const customers = await prisma.customer.findMany({
         where: {
+          ...(shopId ? { shopId } : {}),
           deletedAt: null,
           OR: [
             { name: { contains: q, mode: "insensitive" as const } },
@@ -107,6 +108,7 @@ ledger.get("/", async (c) => {
     if (q) {
       const customers = await prisma.customer.findMany({
         where: {
+          ...(shopId ? { shopId } : {}),
           deletedAt: null,
           OR: [
             { name: { contains: q, mode: "insensitive" as const } },
@@ -165,7 +167,8 @@ ledger.post("/", async (c) => {
     const body = await c.req.json();
     const user = (c as any).get("user") as any;
     let shopId: string | null = ((c as any).get("shopId") as string | null) || user?.shopId || c.req.query("shopId") || null;
-    if (body.shopId) shopId = String(body.shopId);
+    // Only SUPER_ADMIN may target another shop via body.shopId — OWNER/STAFF are pinned to their own shop.
+    if (body.shopId && user.role === "SUPER_ADMIN") shopId = String(body.shopId);
     if (!shopId && user.role !== "SUPER_ADMIN") return c.json({ error: "Shop not assigned" }, 403);
     if (user.role === "SUPER_ADMIN" && !shopId) return c.json({ error: "shopId required" }, 400);
     if (shopId) {
@@ -208,12 +211,14 @@ ledger.post("/", async (c) => {
       if (phone && !/^\d{10}$/.test(phone)) return c.json({ error: "Invalid phone — must be 10 digits" }, 400);
 
       if (phone) {
-        const existing = await prisma.customer.findUnique({ where: { phone } });
+        const existing = await prisma.customer.findFirst({ where: { shopId: shopId!, phone } });
         if (existing) {
+          if ((existing as any).deletedAt) return c.json({ error: "Customer is deleted — restore first" }, 410);
           resolvedCustomerId = existing.id;
         } else {
           const created = await prisma.customer.create({
             data: {
+              shopId: shopId!,
               name: name || `Customer ${phone.slice(-4)}`,
               phone,
               balance: 0,
@@ -224,6 +229,7 @@ ledger.post("/", async (c) => {
       } else if (name) {
         const created = await prisma.customer.create({
           data: {
+            shopId: shopId!,
             name,
             balance: 0,
           },
@@ -233,6 +239,9 @@ ledger.post("/", async (c) => {
     } else {
       const exists = await prisma.customer.findUnique({ where: { id: resolvedCustomerId } });
       if (!exists || (exists as any).deletedAt) return c.json({ error: "Customer not found" }, 404);
+      if ((exists as any).shopId !== shopId && user.role !== "SUPER_ADMIN") {
+        return c.json({ error: "Customer belongs to another shop" }, 403);
+      }
     }
 
     const orderRef = orderId ? String(orderId) : null;

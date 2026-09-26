@@ -9,6 +9,14 @@ const customers = new Hono();
 
 customers.use("*", requireAuth as any);
 
+// Shop scope: OWNER/STAFF forced to own shop; SUPER_ADMIN may filter by ?shopId / body.shopId or see all.
+function getShopScope(c: any) {
+  const user = (c as any).get("user") as any;
+  const shopId =
+    ((c as any).get("shopId") as string | null) || user?.shopId || c.req.query("shopId") || null;
+  return { user, shopId: shopId ? String(shopId) : null };
+}
+
 // GET /api/customers?q&limit&page&sortBy&sortOrder&hasBalance&includeDeleted&due
 // hasBalance: "with" | "without" | ""  (balance >0 vs =0)
 // includeDeleted: "1" to show soft-deleted
@@ -26,9 +34,12 @@ customers.get("/", async (c) => {
   const allowedSort = new Set(["name", "createdAt", "updatedAt", "lastOrderAt", "firstOrderAt", "totalSpent", "totalOrders", "balance"]);
   const sortBy = allowedSort.has(sortByRaw) ? sortByRaw : "createdAt";
   const sortOrder = sortOrderRaw === "asc" ? "asc" as const : "desc" as const;
+  const { user, shopId } = getShopScope(c);
+  if (!shopId && user.role !== "SUPER_ADMIN") return c.json({ error: "Shop not assigned" }, 403);
+  const shopFilter: Record<string, unknown> = shopId ? { shopId } : {};
 
   try {
-    const where: Record<string, unknown> = {};
+    const where: Record<string, unknown> = { ...shopFilter };
     if (!includeDeleted) (where as any).deletedAt = null;
     if (q) {
       (where as any).OR = [
@@ -73,10 +84,10 @@ customers.get("/", async (c) => {
     const thirtyAgo = new Date(now);
     thirtyAgo.setDate(thirtyAgo.getDate() - 30);
     const [totalActive, withDuesAgg, withoutDuesCount, topSpender] = await Promise.all([
-      includeDeleted ? Promise.resolve(total) : prisma.customer.count({ where: { deletedAt: null, lastOrderAt: { gte: thirtyAgo } } }),
-      prisma.customer.aggregate({ where: { deletedAt: null, balance: { gt: 0 } }, _count: { _all: true }, _sum: { balance: true } }),
-      prisma.customer.count({ where: { deletedAt: null, balance: 0 } }),
-      prisma.customer.findFirst({ where: { deletedAt: null }, orderBy: { totalSpent: "desc" }, select: { id: true, name: true, totalSpent: true } }),
+      includeDeleted ? Promise.resolve(total) : prisma.customer.count({ where: { ...shopFilter, deletedAt: null, lastOrderAt: { gte: thirtyAgo } } }),
+      prisma.customer.aggregate({ where: { ...shopFilter, deletedAt: null, balance: { gt: 0 } }, _count: { _all: true }, _sum: { balance: true } }),
+      prisma.customer.count({ where: { ...shopFilter, deletedAt: null, balance: 0 } }),
+      prisma.customer.findFirst({ where: { ...shopFilter, deletedAt: null }, orderBy: { totalSpent: "desc" }, select: { id: true, name: true, totalSpent: true } }),
     ]);
 
     return c.json({
@@ -85,7 +96,7 @@ customers.get("/", async (c) => {
       page,
       limit,
       stats: {
-        totalCustomers: includeDeleted ? total : await prisma.customer.count({ where: { deletedAt: null } }),
+        totalCustomers: includeDeleted ? total : await prisma.customer.count({ where: { ...shopFilter, deletedAt: null } }),
         active30d: totalActive,
         withDues: { count: withDuesAgg._count._all, amount: withDuesAgg._sum.balance ?? 0 },
         withoutDues: withoutDuesCount,
@@ -100,15 +111,18 @@ customers.get("/", async (c) => {
 
 // GET /api/customers/stats  (must be before /:id)
 customers.get("/stats", async (c) => {
+  const { user, shopId } = getShopScope(c);
+  if (!shopId && user.role !== "SUPER_ADMIN") return c.json({ error: "Shop not assigned" }, 403);
+  const shopFilter: Record<string, unknown> = shopId ? { shopId } : {};
   try {
     const now = new Date();
     const ago30 = new Date(now); ago30.setDate(ago30.getDate() - 30);
     const [total, active30d, withDuesAgg, withoutDues, topSpenderList] = await Promise.all([
-      prisma.customer.count({ where: { deletedAt: null } }),
-      prisma.customer.count({ where: { deletedAt: null, lastOrderAt: { gte: ago30 } } }),
-      prisma.customer.aggregate({ where: { deletedAt: null, balance: { gt: 0 } }, _count: { _all: true }, _sum: { balance: true } }),
-      prisma.customer.count({ where: { deletedAt: null, balance: 0 } }),
-      prisma.customer.findMany({ where: { deletedAt: null }, orderBy: { totalSpent: "desc" }, take: 5, select: { id: true, name: true, phone: true, totalSpent: true, totalOrders: true, balance: true } }),
+      prisma.customer.count({ where: { ...shopFilter, deletedAt: null } }),
+      prisma.customer.count({ where: { ...shopFilter, deletedAt: null, lastOrderAt: { gte: ago30 } } }),
+      prisma.customer.aggregate({ where: { ...shopFilter, deletedAt: null, balance: { gt: 0 } }, _count: { _all: true }, _sum: { balance: true } }),
+      prisma.customer.count({ where: { ...shopFilter, deletedAt: null, balance: 0 } }),
+      prisma.customer.findMany({ where: { ...shopFilter, deletedAt: null }, orderBy: { totalSpent: "desc" }, take: 5, select: { id: true, name: true, phone: true, totalSpent: true, totalOrders: true, balance: true } }),
     ]);
     return c.json({
       total,
@@ -130,6 +144,8 @@ customers.get("/:id", async (c) => {
   const ordersPage = Math.max(parseInt(c.req.query("ordersPage") ?? c.req.query("page") ?? "1", 10) || 1, 1);
   const ordersLimit = Math.min(parseInt(c.req.query("ordersLimit") ?? c.req.query("limit") ?? "10", 10) || 10, 50);
   const ledgerFilter = (c.req.query("ledgerFilter") ?? c.req.query("filter") ?? "all").toLowerCase();
+  const { user: detailUser, shopId: detailShopId } = getShopScope(c);
+  if (!detailShopId && detailUser.role !== "SUPER_ADMIN") return c.json({ error: "Shop not assigned" }, 403);
 
   try {
     const customer = await prisma.customer.findUnique({
@@ -145,6 +161,9 @@ customers.get("/:id", async (c) => {
       },
     });
     if (!customer) return c.json({ error: "Not found" }, 404);
+    if (detailShopId && (customer as any).shopId !== detailShopId && detailUser.role !== "SUPER_ADMIN") {
+      return c.json({ error: "Forbidden — customer belongs to another shop" }, 403);
+    }
     if (!includeDeleted && (customer as any).deletedAt) return c.json({ error: "Customer has been deleted", deleted: true }, 410);
 
     const totalOrdersCount = await prisma.order.count({ where: { customerId: id } });
@@ -240,6 +259,19 @@ customers.get("/:id", async (c) => {
 customers.post("/", async (c) => {
   try {
     const body = await c.req.json();
+    const authUser = (c as any).get("user") as any;
+    // OWNER/STAFF forced to own shop; SUPER_ADMIN must supply shopId
+    let shopId: string | null =
+      ((c as any).get("shopId") as string | null) ||
+      authUser?.shopId ||
+      (authUser?.role === "SUPER_ADMIN" ? body.shopId ? String(body.shopId) : c.req.query("shopId") : null) ||
+      null;
+    if (authUser?.role !== "SUPER_ADMIN") shopId = authUser?.shopId || null;
+    if (!shopId) {
+      return c.json({ error: authUser?.role === "SUPER_ADMIN" ? "shopId required for SUPER_ADMIN" : "Shop not assigned" }, authUser?.role === "SUPER_ADMIN" ? 400 : 403);
+    }
+    const shop = await prisma.shop.findUnique({ where: { id: shopId } });
+    if (!shop || (shop as any).deletedAt || !(shop as any).isActive) return c.json({ error: "Shop not found or inactive" }, 404);
     const { name, phone, balance, email, address, notes, creditLimit } = body;
     const trimmedName = String(name ?? "").trim();
     const trimmedPhone = normalizePhone(phone);
@@ -261,7 +293,7 @@ customers.post("/", async (c) => {
     }
 
     if (trimmedPhone) {
-      const existing = await prisma.customer.findUnique({ where: { phone: trimmedPhone } });
+      const existing = await prisma.customer.findFirst({ where: { shopId, phone: trimmedPhone } });
       if (existing && !(existing as any).deletedAt) return c.json({ error: "Customer with this phone already exists", customer: existing }, 409);
       // if soft-deleted with same phone, allow reuse? Keep blocked — suggest restore; for now allow if deleted
       if (existing && (existing as any).deletedAt) {
@@ -273,6 +305,7 @@ customers.post("/", async (c) => {
     // Never trust client balance — always 0, modulated via orders/ledger tx
     const customer = await prisma.customer.create({
       data: {
+        shopId,
         name: trimmedName,
         phone: trimmedPhone || null,
         email: trimmedEmail,
@@ -293,11 +326,18 @@ customers.post("/", async (c) => {
 // PATCH /api/customers/:id  — whitelist only name/phone/email/address/notes/creditLimit (+ restore via body)
 customers.patch("/:id", async (c) => {
   const id = c.req.param("id");
+  const patchUser = (c as any).get("user") as any;
+  const patchShopId = ((c as any).get("shopId") as string | null) || patchUser?.shopId || null;
   try {
     const body = await c.req.json();
+    const pre = await prisma.customer.findUnique({ where: { id } });
+    if (!pre) return c.json({ error: "Not found" }, 404);
+    if (patchShopId && (pre as any).shopId !== patchShopId && patchUser?.role !== "SUPER_ADMIN") {
+      return c.json({ error: "Forbidden — customer belongs to another shop" }, 403);
+    }
     // restore action via body
     if (body.action === "restore" || body.restore === true) {
-      const exists = await prisma.customer.findUnique({ where: { id } });
+      const exists = pre;
       if (!exists) return c.json({ error: "Not found" }, 404);
       if (!(exists as any).deletedAt) return c.json({ customer: exists, message: "Already active" });
       const restored = await prisma.customer.update({ where: { id }, data: { deletedAt: null } });
@@ -315,7 +355,7 @@ customers.patch("/:id", async (c) => {
       const raw = normalizePhone(body.phone);
       if (raw && !/^\d{10}$/.test(raw)) return c.json({ error: "Invalid phone" }, 400);
       if (raw) {
-        const dup = await prisma.customer.findUnique({ where: { phone: raw } });
+        const dup = await prisma.customer.findFirst({ where: { shopId: (pre as any).shopId, phone: raw } });
         if (dup && dup.id !== id && !(dup as { deletedAt?: Date | null }).deletedAt) return c.json({ error: "Phone already used by another customer", customer: dup }, 409);
       }
       allowed.phone = raw;
@@ -342,15 +382,14 @@ customers.patch("/:id", async (c) => {
       }
     }
     // block direct mutation of denormalized fields
-    const blocked = ["balance", "totalSpent", "totalOrders", "lastOrderAt", "firstOrderAt", "deletedAt", "createdAt", "updatedAt", "id"];
+    const blocked = ["balance", "totalSpent", "totalOrders", "lastOrderAt", "firstOrderAt", "deletedAt", "createdAt", "updatedAt", "id", "shopId", "shop"];
     for (const k of blocked) if (k in body && !(k in allowed)) {
       // silently ignore blocked, don't error — but ensure not applied
     }
 
     if (Object.keys(allowed).length === 0) return c.json({ error: "No valid fields to update" }, 400);
 
-    const existing = await prisma.customer.findUnique({ where: { id } });
-    if (!existing) return c.json({ error: "Not found" }, 404);
+    const existing = pre;
     if ((existing as any).deletedAt) return c.json({ error: "Customer is deleted — restore first" }, 410);
 
     const customer = await prisma.customer.update({ where: { id }, data: allowed });
@@ -364,9 +403,14 @@ customers.patch("/:id", async (c) => {
 // DELETE /api/customers/:id  — soft delete only
 customers.delete("/:id", async (c) => {
   const id = c.req.param("id");
+  const delUser = (c as any).get("user") as any;
+  const delShopId = ((c as any).get("shopId") as string | null) || delUser?.shopId || null;
   try {
     const existing = await prisma.customer.findUnique({ where: { id } });
     if (!existing) return c.json({ error: "Not found" }, 404);
+    if (delShopId && (existing as any).shopId !== delShopId && delUser?.role !== "SUPER_ADMIN") {
+      return c.json({ error: "Forbidden — customer belongs to another shop" }, 403);
+    }
     if ((existing as { deletedAt?: Date | null }).deletedAt) return c.json({ error: "Already deleted", customer: existing }, 409);
     const customer = await prisma.customer.update({ where: { id }, data: { deletedAt: new Date() } });
     return c.json({ customer, softDeleted: true });
@@ -379,9 +423,14 @@ customers.delete("/:id", async (c) => {
 // POST /api/customers/:id/restore
 customers.post("/:id/restore", async (c) => {
   const id = c.req.param("id");
+  const resUser = (c as any).get("user") as any;
+  const resShopId = ((c as any).get("shopId") as string | null) || resUser?.shopId || null;
   try {
     const existing = await prisma.customer.findUnique({ where: { id } });
     if (!existing) return c.json({ error: "Not found" }, 404);
+    if (resShopId && (existing as any).shopId !== resShopId && resUser?.role !== "SUPER_ADMIN") {
+      return c.json({ error: "Forbidden — customer belongs to another shop" }, 403);
+    }
     if (!(existing as { deletedAt?: Date | null }).deletedAt) return c.json({ customer: existing, message: "Already active" });
     const customer = await prisma.customer.update({ where: { id }, data: { deletedAt: null } });
     return c.json({ customer });

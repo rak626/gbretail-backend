@@ -449,21 +449,18 @@ analytics.get("/sections", async (c) => {
       };
     });
 
-    // ---- Customers (scoped via shop orders; Customer has no shopId) ----
+    // ---- Customers (per-shop: Customer.shopId) ----
     const idRows = await prisma.order.findMany({
       where: { deletedAt: null, createdAt: { lte: end }, ...shopFilter } as any,
       select: { customerId: true },
     });
     const scopedIds = Array.from(new Set(idRows.map((r) => r.customerId).filter(Boolean))) as string[];
-    const scopedCustomers = scopedIds.length
-      ? await prisma.customer.findMany({
-          where: { id: { in: scopedIds }, deletedAt: null },
-          select: { id: true, name: true, phone: true, totalSpent: true, totalOrders: true, balance: true, firstOrderAt: true, createdAt: true, lastOrderAt: true },
-        })
-      : [];
-    // Per-shop spend: Customer.totalSpent/totalOrders are lifetime-global
-    // (one phone can buy in many shops), so aggregate this shop's orders.
-    // Dues (balance) stay global — money owed is money owed.
+    const scopedCustomers = await prisma.customer.findMany({
+      where: { ...shopFilter, deletedAt: null, ...(scopedIds.length ? { id: { in: scopedIds } } : {}) },
+      select: { id: true, name: true, phone: true, totalSpent: true, totalOrders: true, balance: true, firstOrderAt: true, createdAt: true, lastOrderAt: true },
+    });
+    // Per-shop spend from this shop's orders (authoritative for rankings);
+    // Customer.balance/totalSpent are now per-shop too (one row per shop).
     const perShopAgg = await prisma.order.groupBy({
       by: ["customerId"],
       where: { deletedAt: null, customerId: { not: null }, ...shopFilter } as any,
