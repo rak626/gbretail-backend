@@ -9,6 +9,8 @@ export type JwtPayload = {
   role: string;
   email: string;
   name: string;
+  /** Session version — must match User.tokenVersion (bump revokes all sessions) */
+  tv: number;
 };
 
 export async function hashPassword(plain: string): Promise<string> {
@@ -24,7 +26,7 @@ export function signAccessToken(payload: JwtPayload): string {
   return jwt.sign(payload as object, config.jwtAccessSecret, { expiresIn: config.jwtAccessExpiresIn } as jwt.SignOptions);
 }
 
-export function signRefreshToken(payload: Pick<JwtPayload, "userId" | "shopId" | "role">): string {
+export function signRefreshToken(payload: Pick<JwtPayload, "userId" | "shopId" | "role" | "tv">): string {
   return jwt.sign(payload as object, config.jwtRefreshSecret, { expiresIn: config.jwtRefreshExpiresIn } as jwt.SignOptions);
 }
 
@@ -32,7 +34,7 @@ export function verifyAccessToken(token: string): JwtPayload {
   return jwt.verify(token, config.jwtAccessSecret) as JwtPayload;
 }
 
-export function verifyRefreshToken(token: string): Pick<JwtPayload, "userId" | "shopId" | "role"> & { email?: string } {
+export function verifyRefreshToken(token: string): Pick<JwtPayload, "userId" | "shopId" | "role" | "tv"> & { email?: string } {
   return jwt.verify(token, config.jwtRefreshSecret) as any;
 }
 

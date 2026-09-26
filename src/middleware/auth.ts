@@ -35,11 +35,24 @@ export async function requireAuth(c: Context, next: Next) {
   try {
     const payload = verifyAccessToken(token);
     if (!payload?.userId || !payload?.role) throw new Error("Invalid payload");
-    // Deactivation takes effect immediately — a disabled/deleted account
-    // cannot keep using an unexpired token. Single indexed PK lookup.
-    const row = await prisma.user.findUnique({ where: { id: payload.userId }, select: { isActive: true, deletedAt: true } as any });
+    // Deactivation + revocation take effect immediately — a disabled/deleted
+    // account or a bumped tokenVersion cannot keep using unexpired tokens.
+    // Disabled shops block their staff/owner on every call (super admin exempt).
+    const row = await prisma.user.findUnique({
+      where: { id: payload.userId },
+      select: { isActive: true, deletedAt: true, role: true, shopId: true, tokenVersion: true, shop: { select: { isActive: true, deletedAt: true } } } as any,
+    });
     if (!row || (row as any).deletedAt || !(row as any).isActive) {
       return c.json({ error: "Account disabled", code: "ACCOUNT_DISABLED" }, 403);
+    }
+    if ((payload.tv ?? 0) !== ((row as any).tokenVersion ?? 0)) {
+      return c.json({ error: "Session revoked — login again", code: "SESSION_REVOKED" }, 401);
+    }
+    if ((row as any).role !== "SUPER_ADMIN" && (row as any).shopId) {
+      const sh = (row as any).shop;
+      if (!sh || (sh as any).deletedAt || !(sh as any).isActive) {
+        return c.json({ error: "Shop disabled", code: "SHOP_DISABLED" }, 403);
+      }
     }
     (c as any).set("user", payload);
     (c as any).set("shopId", payload.shopId ?? null);

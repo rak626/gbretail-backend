@@ -143,6 +143,8 @@ users.patch("/:id", async (c) => {
       const p = String(body.password);
       if (p.length < 6) return c.json({ error: "Password >=6" }, 400);
       data.passwordHash = await hashPassword(p);
+      // Password change revokes all existing sessions instantly.
+      data.tokenVersion = { increment: 1 };
     }
     if (body.isActive !== undefined) {
       // Activate/deactivate rules:
@@ -162,6 +164,9 @@ users.patch("/:id", async (c) => {
         }
       }
       data.isActive = Boolean(body.isActive);
+      // Status flip revokes sessions: deactivation kills them now (not at expiry),
+      // reactivation starts clean (old tokens stay dead).
+      data.tokenVersion = { increment: 1 };
     }
     if (body.role !== undefined) {
       if (actor.role !== "SUPER_ADMIN") return c.json({ error: "Only SUPER_ADMIN can change role" }, 403);
@@ -233,6 +238,28 @@ users.post("/:id/restore", requireRole("SUPER_ADMIN", "SHOP_OWNER") as any, asyn
     if (actor.role === "SHOP_OWNER" && (target as any).shopId !== actor.shopId) return c.json({ error: "Forbidden" }, 403);
     const updated = await prisma.user.update({ where: { id }, data: { deletedAt: null, isActive: true }, select: { id: true, shopId: true, email: true, name: true, role: true, canManageInventory: true, counterId: true, isActive: true } });
     return c.json({ user: updated });
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);
+  }
+});
+
+// POST /api/users/:id/revoke-sessions — kill all sessions now (lost device, staff exit).
+// SUPER_ADMIN: anyone. SHOP_OWNER: own-shop STAFF (and self).
+users.post("/:id/revoke-sessions", async (c) => {
+  const actor = (c as any).get("user" as any) as any;
+  const id = c.req.param("id");
+  try {
+    const target = await prisma.user.findUnique({ where: { id } });
+    if (!target || (target as any).deletedAt) return c.json({ error: "User not found" }, 404);
+    const isSelf = actor.userId === id;
+    if (!isSelf) {
+      if (actor.role === "SHOP_OWNER" && ((target as any).role !== "STAFF" || (target as any).shopId !== actor.shopId)) {
+        return c.json({ error: "Owners can only revoke own-shop staff sessions" }, 403);
+      }
+      if (actor.role !== "SUPER_ADMIN" && actor.role !== "SHOP_OWNER") return c.json({ error: "Forbidden" }, 403);
+    }
+    const updated = await prisma.user.update({ where: { id }, data: { tokenVersion: { increment: 1 } }, select: { id: true, tokenVersion: true } });
+    return c.json({ user: { id: updated.id }, sessionsRevoked: true });
   } catch (e) {
     return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);
   }

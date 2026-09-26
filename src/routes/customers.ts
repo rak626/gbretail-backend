@@ -4,6 +4,7 @@ import { normalizePhone, normalizeEmail } from "../lib/normalize.js";
 import { toAppError } from "../lib/errors.js";
 import { startOfDay } from "../lib/utils.js";
 import { requireAuth } from "../middleware/auth.js";
+import { parseMoney, dec, MAX_MONEY } from "../lib/money.js";
 
 const customers = new Hono();
 
@@ -190,7 +191,7 @@ customers.get("/:id", async (c) => {
       _sum: { amount: true },
     });
 
-    const avgOrderValue = (customer.totalOrders && customer.totalOrders > 0) ? customer.totalSpent / customer.totalOrders : 0;
+    const avgOrderValue = (customer.totalOrders && customer.totalOrders > 0) ? dec(customer.totalSpent) / customer.totalOrders : 0;
     const daysSinceLastOrder = customer.lastOrderAt
       ? Math.max(0, Math.floor((Date.now() - new Date(customer.lastOrderAt).getTime()) / (1000 * 60 * 60 * 24)))
       : null;
@@ -278,7 +279,7 @@ customers.post("/", async (c) => {
     const trimmedEmail = normalizeEmail(email);
     const trimmedAddress = address ? String(address).trim().slice(0, 500) : null;
     const trimmedNotes = notes ? String(notes).trim().slice(0, 1000) : null;
-    const parsedCreditLimit = creditLimit != null && String(creditLimit).trim() !== "" ? Number(creditLimit) : null;
+    const parsedCreditLimit = creditLimit != null && String(creditLimit).trim() !== "" ? parseMoney(creditLimit) : null;
 
     if (!trimmedName) return c.json({ error: "Customer name is required" }, 400);
     if (trimmedName.length > 80) return c.json({ error: "Name too long (max 80)" }, 400);
@@ -376,8 +377,8 @@ customers.patch("/:id", async (c) => {
     if (body.creditLimit !== undefined) {
       if (body.creditLimit == null || String(body.creditLimit).trim() === "") allowed.creditLimit = null;
       else {
-        const v = Number(body.creditLimit);
-        if (isNaN(v) || v < 0 || v > 1000000) return c.json({ error: "Invalid creditLimit" }, 400);
+        const v = parseMoney(body.creditLimit);
+        if (isNaN(v) || v < 0 || v > 1000000) return c.json({ error: "Invalid creditLimit (max 2 decimals)" }, 400);
         allowed.creditLimit = v;
       }
     }

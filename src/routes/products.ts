@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { prisma } from "../lib/prisma.js";
 import { requireAuth } from "../middleware/auth.js";
+import { parseMoney, MAX_MONEY } from "../lib/money.js";
 
 const products = new Hono();
 
@@ -100,14 +101,20 @@ products.post("/", async (c) => {
     if (costPrice == null || isNaN(Number(costPrice)) || Number(costPrice) < 0) {
       return c.json({ error: "costPrice (buying price) is required and must be >=0" }, 400);
     }
+    const costRounded = parseMoney(costPrice);
+    if (isNaN(costRounded) || costRounded > MAX_MONEY) return c.json({ error: "Invalid costPrice (max 2 decimals)" }, 400);
     if (is_loose) {
       if (rate_per_kg == null || isNaN(Number(rate_per_kg)) || Number(rate_per_kg) <= 0) {
         return c.json({ error: "rate_per_kg required for loose" }, 400);
       }
+      const r = parseMoney(rate_per_kg);
+      if (isNaN(r) || r <= 0 || r > MAX_MONEY) return c.json({ error: "Invalid rate_per_kg (max 2 decimals)" }, 400);
     } else {
       if (price == null || isNaN(Number(price)) || Number(price) < 0) {
         return c.json({ error: "price required for packaged" }, 400);
       }
+      const p = parseMoney(price);
+      if (isNaN(p) || p > MAX_MONEY) return c.json({ error: "Invalid price (max 2 decimals)" }, 400);
     }
 
     if (barcode) {
@@ -128,14 +135,14 @@ products.post("/", async (c) => {
       shopId,
       name: String(name).trim(),
       is_loose: Boolean(is_loose),
-      rate_per_kg: rate_per_kg != null ? Number(rate_per_kg) : null,
+      rate_per_kg: rate_per_kg != null ? parseMoney(rate_per_kg) : null,
       barcode: barcode ? String(barcode).trim() : null,
-      price: price != null ? Number(price) : null,
-      costPrice: Number(costPrice),
+      price: price != null ? parseMoney(price) : null,
+      costPrice: costRounded,
       unit: unit ? String(unit) : "pcs",
       category: String(category),
       preset_weights: Array.isArray(preset_weights) ? (preset_weights as unknown[]).map(Number).filter((n) => !isNaN(n)) : [],
-      preset_prices: Array.isArray(preset_prices) ? (preset_prices as unknown[]).map(Number).filter((n) => !isNaN(n)) : [],
+      preset_prices: Array.isArray(preset_prices) ? (preset_prices as unknown[]).map((v) => parseMoney(v)).filter((n) => !isNaN(n)) : [],
       stockQuantity: stockQuantity != null ? Number(stockQuantity) : 100,
       lowStockThreshold: lowStockThreshold != null ? Number(lowStockThreshold) : 10,
     };
@@ -191,12 +198,20 @@ products.patch("/:id", async (c) => {
     for (const k of fields) if (k in body) allowed[k] = (body as Record<string, unknown>)[k];
 
     if (allowed.costPrice != null) {
-      const cp = Number(allowed.costPrice);
-      if (isNaN(cp) || cp < 0) return c.json({ error: "costPrice must be >=0" }, 400);
+      const cp = parseMoney(allowed.costPrice);
+      if (isNaN(cp) || cp < 0 || cp > MAX_MONEY) return c.json({ error: "costPrice must be >=0 (max 2 decimals)" }, 400);
       allowed.costPrice = cp;
     }
-    if (allowed.price != null) allowed.price = Number(allowed.price as number);
-    if (allowed.rate_per_kg != null) allowed.rate_per_kg = Number(allowed.rate_per_kg as number);
+    if (allowed.price != null) {
+      const p = parseMoney(allowed.price as number);
+      if (isNaN(p) || p < 0 || p > MAX_MONEY) return c.json({ error: "Invalid price (max 2 decimals)" }, 400);
+      allowed.price = p;
+    }
+    if (allowed.rate_per_kg != null) {
+      const r = parseMoney(allowed.rate_per_kg as number);
+      if (isNaN(r) || r <= 0 || r > MAX_MONEY) return c.json({ error: "Invalid rate_per_kg (max 2 decimals)" }, 400);
+      allowed.rate_per_kg = r;
+    }
     if (allowed.stockQuantity != null) {
       const sq = Number(allowed.stockQuantity as number);
       if (isNaN(sq) || sq < 0) return c.json({ error: "stockQuantity must be >=0" }, 400);
@@ -212,7 +227,7 @@ products.patch("/:id", async (c) => {
     if (allowed.barcode != null) allowed.barcode = allowed.barcode ? String(allowed.barcode).trim() : null;
     if (allowed.unit != null) allowed.unit = String(allowed.unit);
     if (allowed.preset_weights != null) allowed.preset_weights = Array.isArray(allowed.preset_weights) ? (allowed.preset_weights as unknown[]).map(Number).filter((n) => !isNaN(n)) : [];
-    if (allowed.preset_prices != null) allowed.preset_prices = Array.isArray(allowed.preset_prices) ? (allowed.preset_prices as unknown[]).map(Number).filter((n) => !isNaN(n)) : [];
+    if (allowed.preset_prices != null) allowed.preset_prices = Array.isArray(allowed.preset_prices) ? (allowed.preset_prices as unknown[]).map((v) => parseMoney(v)).filter((n) => !isNaN(n)) : [];
 
     if (Object.keys(allowed).length === 0) return c.json({ error: "No valid fields to update" }, 400);
 

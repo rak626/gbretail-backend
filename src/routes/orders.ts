@@ -5,6 +5,8 @@ import { normalizePhone } from "../lib/normalize.js";
 import { toAppError, AppError } from "../lib/errors.js";
 import { requireAuth } from "../middleware/auth.js";
 import { resolveStaffCounter } from "../lib/staffCounter.js";
+import { round2, parseMoney, dec, MAX_MONEY } from "../lib/money.js";
+import { getIdempotencyKey, isValidIdempotencyKey, fingerprint } from "../lib/idempotency.js";
 
 const orders = new Hono();
 
@@ -154,6 +156,10 @@ orders.get("/:id", async (c) => {
 
 // POST /api/orders
 orders.post("/", async (c) => {
+  // Hoisted for the P2002 race fallback in catch (block-scoped consts inside try are invisible there)
+  let idemKey: string | null = null;
+  let orderFingerprint: string | null = null;
+  let findIdempotentOrder: (() => Promise<unknown>) | null = null;
   try {
     const body = await c.req.json();
     const user = (c as any).get("user") as any;
@@ -166,13 +172,19 @@ orders.post("/", async (c) => {
     const shop = await prisma.shop.findUnique({ where: { id: shopId! } });
     if (!shop || (shop as any).deletedAt || !(shop as any).isActive) return c.json({ error: "Shop not found or inactive" }, 404);
 
-    let { items, total, discount = 0, paymentMethod, customerId, customerName, customerPhone, status = "completed", creditDays, customDays, counterId } = body;
+    let { items, total, discount = 0, paymentMethod, customerId, customerName, customerPhone, status = "completed", creditDays, customDays, counterId, splitCash, splitUpi } = body;
 
     if (!Array.isArray(items) || items.length === 0) {
       return c.json({ error: "Items required" }, 400);
     }
     if (!paymentMethod || !["cash", "upi", "khata", "split"].includes(paymentMethod)) {
       return c.json({ error: "Invalid paymentMethod" }, 400);
+    }
+    // Split-tender breakdown: required for split, forbidden otherwise (single-method
+    // semantics stay strict — cash/upi/khata rows keep NULL tender columns).
+    const tenderSent = splitCash != null || splitUpi != null;
+    if (paymentMethod !== "split" && tenderSent) {
+      return c.json({ error: "splitCash/splitUpi only allowed with paymentMethod 'split'" }, 400);
     }
 
     // Counter validation: STAFF always bill on their assigned counter
@@ -193,24 +205,86 @@ orders.post("/", async (c) => {
       if (firstCounter) counterId = firstCounter.id;
     }
 
-    // RECACLULATE totals server-side — never trust client total
+    // RECALCULATE totals server-side — never trust client total.
+    // Each line rounded to 2dp, then the bill rounded. costPrice is NOT trusted here
+    // (resolved from DB inside the tx); the loop below only validates money shape.
     let gross = 0;
     for (const it of items as Record<string, unknown>[]) {
-      const lt = Number((it as any).lineTotal);
-      const price = Number((it as any).price);
-      if (isNaN(lt) || lt < 0) return c.json({ error: `Invalid lineTotal for ${(it as any).name}` }, 400);
-      if (isNaN(price) || price < 0) return c.json({ error: `Invalid price for ${(it as any).name}` }, 400);
+      const lt = parseMoney((it as any).lineTotal);
+      const price = parseMoney((it as any).price);
+      if (isNaN(lt) || lt < 0 || lt > MAX_MONEY) return c.json({ error: `Invalid lineTotal for ${(it as any).name}` }, 400);
+      if (isNaN(price) || price < 0 || price > MAX_MONEY) return c.json({ error: `Invalid price for ${(it as any).name}` }, 400);
       const q = Number((it as any).quantity ?? (it as any).weight ?? 1);
       if (isNaN(q) || q <= 0) return c.json({ error: `Invalid quantity/weight for ${(it as any).name}` }, 400);
-      gross += lt;
+      // lineTotal must match price × qty to the paise (integer-paise compare so
+      // binary-float dust like 0.010000000000000009 never causes false rejects)
+      const expected = round2(price * q);
+      if (Math.round(lt * 100) !== Math.round(expected * 100)) return c.json({ error: `lineTotal mismatch for ${(it as any).name}: expected ${expected.toFixed(2)}` }, 400);
+      (it as any).lineTotal = lt;
+      (it as any).price = price;
+      gross = round2(gross + lt);
     }
-    gross = Math.round(gross * 100) / 100;
-    discount = Number(discount);
-    if (isNaN(discount) || discount < 0) return c.json({ error: "Discount must be >=0" }, 400);
+    gross = round2(gross);
+    discount = parseMoney(discount);
+    if (isNaN(discount) || discount < 0 || discount > MAX_MONEY) return c.json({ error: "Discount must be >=0" }, 400);
     if (discount > gross) return c.json({ error: `Discount (${discount}) cannot exceed gross (${gross})` }, 400);
-    const netTotal = Math.round((gross - discount) * 100) / 100;
+    const netTotal = round2(gross - discount);
     // Use netTotal as the order total (after discount)
     total = netTotal;
+
+    // Split tender must cover the bill exactly, to the paise.
+    let tenderCash: number | null = null;
+    let tenderUpi: number | null = null;
+    if (paymentMethod === "split") {
+      tenderCash = parseMoney(splitCash);
+      tenderUpi = parseMoney(splitUpi);
+      if (isNaN(tenderCash) || tenderCash <= 0 || tenderCash > MAX_MONEY) return c.json({ error: "splitCash required (>0, max 2 decimals)" }, 400);
+      if (isNaN(tenderUpi) || tenderUpi <= 0 || tenderUpi > MAX_MONEY) return c.json({ error: "splitUpi required (>0, max 2 decimals)" }, 400);
+      if (Math.round(round2(tenderCash + tenderUpi) * 100) !== Math.round(netTotal * 100)) {
+        return c.json({ error: `splitCash + splitUpi must equal total ${netTotal.toFixed(2)}` }, 400);
+      }
+    }
+
+    // Idempotency: same key + same bill -> return original; same key + different bill -> 422.
+    idemKey = getIdempotencyKey(c, body as Record<string, unknown>);
+    if (idemKey && !isValidIdempotencyKey(idemKey)) {
+      return c.json({ error: "Invalid Idempotency-Key (8-128 chars: A-Z a-z 0-9 _ -)", code: "INVALID_IDEMPOTENCY_KEY" }, 400);
+    }
+    orderFingerprint = idemKey
+      ? fingerprint({
+          total: netTotal,
+          discount,
+          paymentMethod,
+          splitCash: tenderCash,
+          splitUpi: tenderUpi,
+          items: (items as Record<string, unknown>[]).map((it) => ({
+            productId: (it.productId as string) || null,
+            name: String(it.name),
+            price: (it as any).price,
+            qty: Number((it as any).quantity ?? (it as any).weight ?? 1),
+            lineTotal: (it as any).lineTotal,
+          })),
+          customer: customerId ? String(customerId) : `${normalizePhone(customerPhone) || ""}|${customerName ? String(customerName).trim() : ""}`,
+          counterId: counterId ? String(counterId) : null,
+        })
+      : null;
+    findIdempotentOrder = async () => {
+      if (!idemKey) return null;
+      return prisma.order.findFirst({
+        where: { shopId: shopId!, idempotencyKey: idemKey },
+        include: { items: true, customer: true },
+      });
+    };
+    if (idemKey) {
+      const dup = (await findIdempotentOrder()) as any;
+      if (dup) {
+        if ((dup as any).deletedAt) return c.json({ error: "Duplicate — this bill was already voided", code: "IDEMPOTENT_REPLAY_VOIDED", orderNumber: (dup as any).orderNumber }, 409);
+        if ((dup as any).idempotencyFingerprint && (dup as any).idempotencyFingerprint !== orderFingerprint) {
+          return c.json({ error: "Idempotency-Key already used for a different bill", code: "IDEMPOTENCY_KEY_REUSED" }, 422);
+        }
+        return c.json({ order: dup, lowStockWarnings: [], idempotentReplay: true });
+      }
+    }
 
     // Use transaction to ensure atomicity: customer updates + order + ledger + stock
     // lowStockWarnings is informational only — sales are never blocked (warn-only)
@@ -295,6 +369,15 @@ orders.post("/", async (c) => {
         if (!exists) resolvedCustomerId = null;
       }
 
+      // Resolve costPrice from DB — never trust client cost (profit manipulation).
+      const prodIds = (items as Record<string, unknown>[])
+        .filter((it) => !it.isCustom && it.productId)
+        .map((it) => String(it.productId));
+      const dbProds = prodIds.length
+        ? await tx.product.findMany({ where: { id: { in: prodIds } }, select: { id: true, costPrice: true } })
+        : [];
+      const costMap = new Map<string, number>(dbProds.map((p) => [p.id, dec((p as any).costPrice)]));
+
       // Create order with shop/counter/user tracking — orderNumber already shop-unique with random tail, no retry needed
       const createdOrder = await tx.order.create({
         data: {
@@ -302,24 +385,30 @@ orders.post("/", async (c) => {
           shopId: shopId!,
           counterId: counterId ? String(counterId) : null,
           userId: user.userId,
-          total: Number(total),
-          discount: Number(discount),
+          total: round2(Number(total)),
+          discount: round2(Number(discount)),
           paymentMethod,
           customerId: resolvedCustomerId,
           status,
+          ...(paymentMethod === "split" ? { cashAmount: tenderCash, upiAmount: tenderUpi } : {}),
+          ...(idemKey ? { idempotencyKey: idemKey, idempotencyFingerprint: orderFingerprint } : {}),
           items: {
-            create: (items as Record<string, unknown>[]).map((it) => ({
-              productId: (it.productId as string) || null,
-              name: String(it.name),
-              price: Number(it.price),
-              unit: String(it.unit ?? "pcs"),
-              quantity: it.quantity != null ? Number(it.quantity) : null,
-              weight: it.weight != null ? Number(it.weight) : null,
-              lineTotal: Number(it.lineTotal),
-              isCustom: Boolean(it.isCustom),
-              costPrice: it.costPrice != null ? Number(it.costPrice) : null,
-              category: it.category ? String(it.category) : null,
-            })),
+            create: (items as Record<string, unknown>[]).map((it) => {
+              const pid = (it.productId as string) || null;
+              const customCost = it.costPrice != null ? parseMoney(it.costPrice) : NaN;
+              return {
+                productId: pid,
+                name: String(it.name),
+                price: round2(Number(it.price)),
+                unit: String(it.unit ?? "pcs"),
+                quantity: it.quantity != null ? Number(it.quantity) : null,
+                weight: it.weight != null ? Number(it.weight) : null,
+                lineTotal: round2(Number(it.lineTotal)),
+                isCustom: Boolean(it.isCustom),
+                costPrice: pid && !it.isCustom ? (costMap.get(pid) ?? 0) : isNaN(customCost) ? null : customCost,
+                category: it.category ? String(it.category) : null,
+              };
+            }),
           },
         },
         include: { items: true, customer: true },
@@ -336,7 +425,7 @@ orders.post("/", async (c) => {
             userId: user.userId,
             customerId: resolvedCustomerId,
             orderId: createdOrder.id,
-            amount: Number(total),
+            amount: round2(Number(total)),
             creditDays: days,
             dueDate,
             status: "pending",
@@ -385,6 +474,24 @@ orders.post("/", async (c) => {
 
     return c.json({ order, lowStockWarnings }, 201);
   } catch (e) {
+    // Race fallback: two same-key requests passed the pre-check together — the loser
+    // hits the unique constraint. Return the winner instead of a duplicate/409.
+    if (idemKey) {
+      const msg = e instanceof Error ? e.message : "";
+      if (msg.includes("P2002") || msg.includes("Unique constraint") || msg.includes("idempotency")) {
+        try {
+          const winner = (await findIdempotentOrder!()) as any;
+          if (winner && !(winner as any).deletedAt) {
+            if ((winner as any).idempotencyFingerprint && (winner as any).idempotencyFingerprint !== orderFingerprint) {
+              return c.json({ error: "Idempotency-Key already used for a different bill", code: "IDEMPOTENCY_KEY_REUSED" }, 422);
+            }
+            return c.json({ order: winner, lowStockWarnings: [], idempotentReplay: true });
+          }
+        } catch {
+          // fall through to normal error
+        }
+      }
+    }
     console.error("[POST /orders]", e);
     const appErr = toAppError(e);
     return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 404 | 409 | 500 | 503);

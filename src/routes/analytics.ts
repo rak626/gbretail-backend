@@ -104,8 +104,10 @@ analytics.get("/summary", async (c) => {
     const categoryMap = new Map<string, { gross: number; net: number; profit: number; qty: number }>();
     const productMap = new Map<string, { productId: string | null; name: string; category: string | null; qty: number; gross: number; profit: number }>();
 
-    // Payment split
+    // Payment split (by method) + tender split (cash vs UPI inside split bills, for drawer tally)
     const paymentSplit: Record<string, number> = { cash: 0, upi: 0, khata: 0, split: 0 };
+    let tenderSplitCash = 0;
+    let tenderSplitUpi = 0;
 
     // Timeseries buckets
     const bucketKeys = generateEmptyBuckets(start, end, granularity);
@@ -163,6 +165,11 @@ analytics.get("/summary", async (c) => {
       const pm = (o.paymentMethod ?? "cash").toLowerCase();
       if (paymentSplit[pm] !== undefined) paymentSplit[pm] += net;
       else paymentSplit[pm] = net;
+      // tender inside split bills: cash-in-drawer vs UPI-settled attribution
+      if (pm === "split") {
+        tenderSplitCash += Number((o as any).cashAmount ?? 0);
+        tenderSplitUpi += Number((o as any).upiAmount ?? 0);
+      }
 
       // timeseries bucket
       const bkey = getBucketKey(o.createdAt as Date, granularity);
@@ -364,6 +371,10 @@ analytics.get("/summary", async (c) => {
         upi: Number((paymentSplit.upi ?? 0).toFixed(2)),
         khata: Number((paymentSplit.khata ?? 0).toFixed(2)),
         split: Number((paymentSplit.split ?? 0).toFixed(2)),
+      },
+      tender: {
+        splitCash: Number(tenderSplitCash.toFixed(2)),
+        splitUpi: Number(tenderSplitUpi.toFixed(2)),
       },
       ledger: {
         created: { count: ledgerCreatedCount, amount: Number(ledgerCreatedAmount.toFixed(2)) },
@@ -581,7 +592,7 @@ analytics.get("/export", async (c) => {
     const tsMap = new Map<string, { orders: number; gross: number; net: number; profit: number }>();
     for (const k of bucketKeys) tsMap.set(k, { orders:0, gross:0, net:0, profit:0 });
 
-    let gross = 0, net = 0, discount = 0, profitNet = 0;
+    let gross = 0, net = 0, discount = 0, profitNet = 0, tenderCash = 0, tenderUpi = 0;
     const productMap = new Map<string, { name: string; category: string; qty:number; gross:number; profit:number }>();
     const catMap = new Map<string, { gross:number; net:number; profit:number; qty:number }>();
 
@@ -590,6 +601,10 @@ analytics.get("/export", async (c) => {
       const odiscount = Number(o.discount ?? 0);
       const onet = Number(o.total);
       gross += ogross; discount += odiscount; net += onet;
+      if ((o.paymentMethod ?? "").toLowerCase() === "split") {
+        tenderCash += Number((o as any).cashAmount ?? 0);
+        tenderUpi += Number((o as any).upiAmount ?? 0);
+      }
       const allocs = allocateDiscountToItems(o.items as any, odiscount, ogross);
       let orderProfit = 0;
       (o.items as any[]).forEach((it, idx)=>{
@@ -634,7 +649,7 @@ analytics.get("/export", async (c) => {
     }
 
     if (format === "json") {
-      return c.json({ range: { start: start.toISOString(), end: end.toISOString(), label: bounds.label, granularity }, kpis:{ orders: orders.length, gross, discount, net, profit: profitNet }, timeseries, topProducts, categories, aging: Array.from(agingMap.entries()).map(([bucket, v])=>({bucket, ...v})) });
+      return c.json({ range: { start: start.toISOString(), end: end.toISOString(), label: bounds.label, granularity }, kpis:{ orders: orders.length, gross, discount, net, profit: profitNet, tender: { splitCash: tenderCash, splitUpi: tenderUpi } }, timeseries, topProducts, categories, aging: Array.from(agingMap.entries()).map(([bucket, v])=>({bucket, ...v})) });
     }
 
     // CSV
@@ -642,8 +657,8 @@ analytics.get("/export", async (c) => {
     csv += `GB Retail Analytics Export - ${bounds.label} (${start.toISOString().slice(0,10)} to ${end.toISOString().slice(0,10)}) granularity:${granularity}\n`;
     csv += `Generated: ${new Date().toISOString()}\n\n`;
     csv += `KPIs\n`;
-    csv += `Orders,Gross,Discount,Net Revenue,Profit Net,Margin %\n`;
-    csv += `${orders.length},${gross.toFixed(2)},${discount.toFixed(2)},${net.toFixed(2)},${profitNet.toFixed(2)},${net? (profitNet/net*100).toFixed(2):0}\n\n`;
+    csv += `Orders,Gross,Discount,Net Revenue,Profit Net,Margin %,Split Cash,Split UPI\n`;
+    csv += `${orders.length},${gross.toFixed(2)},${discount.toFixed(2)},${net.toFixed(2)},${profitNet.toFixed(2)},${net? (profitNet/net*100).toFixed(2):0},${tenderCash.toFixed(2)},${tenderUpi.toFixed(2)}\n\n`;
 
     csv += `Timeseries (bucket,orders,gross,net,profit)\n`;
     csv += `Bucket,Label,Orders,Gross,Net Revenue,Profit\n`;

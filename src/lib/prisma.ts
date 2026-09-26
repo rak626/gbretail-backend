@@ -1,9 +1,15 @@
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient, Prisma } from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaNeon } from "@prisma/adapter-neon";
 import { neonConfig } from "@neondatabase/serverless";
 import ws from "ws";
 import { config } from "../config.js";
+
+// API contract speaks plain numbers (frontend expects number, formats with toFixed(2)).
+// DB stays exact NUMERIC(12,2); only the JSON boundary converts Decimal -> number.
+(Prisma.Decimal.prototype as unknown as { toJSON: () => number }).toJSON = function (this: InstanceType<typeof Prisma.Decimal>) {
+  return this.toNumber();
+};
 
 // Edge-aware Prisma singleton
 // - Local Node (default): PrismaPg + pg TCP

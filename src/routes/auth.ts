@@ -20,8 +20,8 @@ auth.post("/login", async (c) => {
     const user = await prisma.user.findUnique({ where: { email }, include: { shop: { select: { id: true, name: true, isActive: true, deletedAt: true } }, counter: { select: { id: true, name: true } } } });
     if (!user || (user as any).deletedAt) return c.json({ error: "Invalid credentials" }, 401);
     if (!(user as any).isActive) return c.json({ error: "Account disabled" }, 403);
-    // Deactivated shop blocks its staff/owner at login (super admin unaffected).
-    // Login-only enforcement: unexpired tokens keep working until expiry/refresh.
+    // Deactivated shop blocks its staff/owner at login, refresh, and every
+    // authenticated call (requireAuth re-checks). Super admin unaffected.
     if ((user as any).role !== "SUPER_ADMIN" && (user as any).shopId) {
       const sh = (user as any).shop;
       if (!sh || (sh as any).deletedAt || !(sh as any).isActive) return c.json({ error: "Shop disabled" }, 403);
@@ -60,10 +60,11 @@ auth.post("/login", async (c) => {
       role: (user as any).role,
       email: (user as any).email,
       name: (user as any).name,
+      tv: (user as any).tokenVersion ?? 0,
     };
 
     const accessToken = signAccessToken(payload as any);
-    const refreshToken = signRefreshToken({ userId: user.id, shopId: (user as any).shopId ?? null, role: (user as any).role });
+    const refreshToken = signRefreshToken({ userId: user.id, shopId: (user as any).shopId ?? null, role: (user as any).role, tv: (user as any).tokenVersion ?? 0 });
 
     // Set httpOnly cookies for refresh + optional access fallback
     const isProduction = process.env.NODE_ENV === "production";
@@ -106,8 +107,17 @@ auth.post("/refresh", async (c) => {
     if (!token) return c.json({ error: "Refresh token required" }, 401);
 
     const decoded = verifyRefreshToken(token) as any;
-    const user = await prisma.user.findUnique({ where: { id: decoded.userId }, include: { shop: { select: { id: true, name: true } } } });
-    if (!user || (user as any).deletedAt || !(user as any).isActive) return c.json({ error: "User not found or disabled" }, 401);
+    const user = await prisma.user.findUnique({ where: { id: decoded.userId }, include: { shop: { select: { id: true, name: true, isActive: true, deletedAt: true } } } });
+    if (!user || (user as any).deletedAt || !(user as any).isActive) return c.json({ error: "User not found or disabled", code: "ACCOUNT_DISABLED" }, 401);
+    // Revoked sessions stop here (password change, deactivate, revoke-sessions).
+    if ((decoded.tv ?? 0) !== ((user as any).tokenVersion ?? 0)) {
+      return c.json({ error: "Session revoked — login again", code: "SESSION_REVOKED" }, 401);
+    }
+    // Disabled/deleted shop blocks refresh too (was login-only before).
+    if ((user as any).role !== "SUPER_ADMIN" && (user as any).shopId) {
+      const sh = (user as any).shop;
+      if (!sh || (sh as any).deletedAt || !(sh as any).isActive) return c.json({ error: "Shop disabled", code: "SHOP_DISABLED" }, 403);
+    }
 
     const payload = {
       userId: user.id,
@@ -115,9 +125,10 @@ auth.post("/refresh", async (c) => {
       role: (user as any).role,
       email: (user as any).email,
       name: (user as any).name,
+      tv: (user as any).tokenVersion ?? 0,
     };
     const accessToken = signAccessToken(payload as any);
-    const newRefresh = signRefreshToken({ userId: user.id, shopId: (user as any).shopId ?? null, role: (user as any).role });
+    const newRefresh = signRefreshToken({ userId: user.id, shopId: (user as any).shopId ?? null, role: (user as any).role, tv: (user as any).tokenVersion ?? 0 });
 
     const isProduction = process.env.NODE_ENV === "production";
     setCookie(c, "refreshToken", newRefresh, {
@@ -171,7 +182,8 @@ auth.get("/me", requireAuth as any, async (c) => {
   }
 });
 
-// GET /api/auth/verify — lightweight token check
+// GET /api/auth/verify — token check with live account/shop/session state
+// (signature-only is not enough: disabled users/shops and revoked sessions read invalid).
 auth.get("/verify", async (c) => {
   const authHeader = c.req.header("authorization") || c.req.header("Authorization") || "";
   const cookie = c.req.header("cookie") || "";
@@ -187,6 +199,16 @@ auth.get("/verify", async (c) => {
   if (!token) return c.json({ valid: false, error: "No token" }, 401);
   try {
     const p = verifyAccessToken(token);
+    const row = await prisma.user.findUnique({
+      where: { id: (p as any).userId },
+      select: { isActive: true, deletedAt: true, role: true, shopId: true, tokenVersion: true, shop: { select: { isActive: true, deletedAt: true } } } as any,
+    });
+    if (!row || (row as any).deletedAt || !(row as any).isActive) return c.json({ valid: false, error: "Account disabled" }, 403);
+    if (((p as any).tv ?? 0) !== ((row as any).tokenVersion ?? 0)) return c.json({ valid: false, error: "Session revoked" }, 401);
+    if ((row as any).role !== "SUPER_ADMIN" && (row as any).shopId) {
+      const sh = (row as any).shop;
+      if (!sh || (sh as any).deletedAt || !(sh as any).isActive) return c.json({ valid: false, error: "Shop disabled" }, 403);
+    }
     return c.json({ valid: true, payload: p });
   } catch (e) {
     return c.json({ valid: false, error: e instanceof Error ? e.message : "Invalid" }, 401);

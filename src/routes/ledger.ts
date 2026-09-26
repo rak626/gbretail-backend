@@ -4,6 +4,8 @@ import { addDays, endOfDay, startOfDay, computeDueDate } from "../lib/utils.js";
 import { normalizePhone, parseCreditDays, normalizeCreditTerm } from "../lib/normalize.js";
 import { toAppError } from "../lib/errors.js";
 import { requireAuth } from "../middleware/auth.js";
+import { parseMoney, dec, MAX_MONEY } from "../lib/money.js";
+import { getIdempotencyKey, isValidIdempotencyKey, fingerprint } from "../lib/idempotency.js";
 
 const ledger = new Hono();
 
@@ -163,6 +165,9 @@ ledger.get("/", async (c) => {
 
 // POST /api/ledger
 ledger.post("/", async (c) => {
+  let ledgerIdemKey: string | null = null;
+  let ledgerFingerprint: string | null = null;
+  let findIdempotentEntry: (() => Promise<unknown>) | null = null;
   try {
     const body = await c.req.json();
     const user = (c as any).get("user") as any;
@@ -189,9 +194,9 @@ ledger.post("/", async (c) => {
 
     const { customerId, customerName, customerPhone, amount, creditDays, customDays, note, orderId } = body;
 
-    const parsedAmount = Number(amount);
+    const parsedAmount = parseMoney(amount);
     if (!parsedAmount || isNaN(parsedAmount) || parsedAmount <= 0) {
-      return c.json({ error: "Valid amount required (>0)" }, 400);
+      return c.json({ error: "Valid amount required (>0, max 2 decimals)" }, 400);
     }
     if (parsedAmount > 1000000) return c.json({ error: "Amount too large (max 10,00,000)" }, 400);
 
@@ -253,6 +258,40 @@ ledger.post("/", async (c) => {
 
     const dueDateNormalized = computeDueDate(effectiveDays);
 
+    // Idempotency: same key + same due -> return original; same key + different due -> 422.
+    ledgerIdemKey = getIdempotencyKey(c, body as Record<string, unknown>);
+    if (ledgerIdemKey && !isValidIdempotencyKey(ledgerIdemKey)) {
+      return c.json({ error: "Invalid Idempotency-Key (8-128 chars: A-Z a-z 0-9 _ -)", code: "INVALID_IDEMPOTENCY_KEY" }, 400);
+    }
+    ledgerFingerprint = ledgerIdemKey
+      ? fingerprint({
+          amount: parsedAmount,
+          customer: resolvedCustomerId ?? `${normalizePhone(customerPhone) || ""}|${customerName ? String(customerName).trim() : ""}`,
+          orderId: orderRef,
+          creditDays: effectiveDays,
+          note: note ? String(note).trim().slice(0, 300) : null,
+          counterId,
+        })
+      : null;
+    findIdempotentEntry = async () => {
+      if (!ledgerIdemKey) return null;
+      return prisma.ledgerEntry.findFirst({
+        where: { shopId: shopId!, idempotencyKey: ledgerIdemKey },
+        include: { customer: { select: { id: true, name: true, phone: true, balance: true } }, order: { select: { id: true, orderNumber: true } } },
+      });
+    };
+    if (ledgerIdemKey) {
+      const dup = (await findIdempotentEntry()) as any;
+      if (dup) {
+        if ((dup as any).deletedAt) return c.json({ error: "Duplicate — this entry was already deleted", code: "IDEMPOTENT_REPLAY_VOIDED" }, 409);
+        if ((dup as any).idempotencyFingerprint && (dup as any).idempotencyFingerprint !== ledgerFingerprint) {
+          return c.json({ error: "Idempotency-Key already used for a different entry", code: "IDEMPOTENCY_KEY_REUSED" }, 422);
+        }
+        const customer = await prisma.customer.findUnique({ where: { id: (dup as any).customerId }, select: { id: true, name: true, phone: true, balance: true } });
+        return c.json({ entry: { ...dup, customer }, idempotentReplay: true });
+      }
+    }
+
     // Transaction: ledger + balance increment + shop/counter/user tracking
     const entry = await prisma.$transaction(async (tx) => {
       const e = await tx.ledgerEntry.create({
@@ -267,6 +306,7 @@ ledger.post("/", async (c) => {
           dueDate: dueDateNormalized,
           status: "pending",
           note: note ? String(note).trim().slice(0, 300) : null,
+          ...(ledgerIdemKey ? { idempotencyKey: ledgerIdemKey, idempotencyFingerprint: ledgerFingerprint } : {}),
         },
         include: { customer: { select: { id: true, name: true, phone: true, balance: true } }, order: { select: { id: true, orderNumber: true } } },
       });
@@ -281,6 +321,24 @@ ledger.post("/", async (c) => {
 
     return c.json({ entry: { ...entry, customer: updatedCustomer } }, 201);
   } catch (e) {
+    // Race fallback: same-key concurrent posts — return the winner (see orders.ts).
+    if (ledgerIdemKey) {
+      const msg = e instanceof Error ? e.message : "";
+      if (msg.includes("P2002") || msg.includes("Unique constraint") || msg.includes("idempotency")) {
+        try {
+          const winner = (await findIdempotentEntry!()) as any;
+          if (winner && !(winner as any).deletedAt) {
+            if ((winner as any).idempotencyFingerprint && (winner as any).idempotencyFingerprint !== ledgerFingerprint) {
+              return c.json({ error: "Idempotency-Key already used for a different entry", code: "IDEMPOTENCY_KEY_REUSED" }, 422);
+            }
+            const customer = await prisma.customer.findUnique({ where: { id: (winner as any).customerId }, select: { id: true, name: true, phone: true, balance: true } });
+            return c.json({ entry: { ...winner, customer }, idempotentReplay: true });
+          }
+        } catch {
+          // fall through to normal error
+        }
+      }
+    }
     const appErr = toAppError(e);
     return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 404 | 409 | 500 | 503);
   }
@@ -330,7 +388,7 @@ ledger.patch("/:id", async (c) => {
           data: { balance: { decrement: entry.amount } },
         });
         const cust = await tx.customer.findUnique({ where: { id: entry.customerId } });
-        if (cust && cust.balance < 0) {
+        if (cust && dec(cust.balance) < 0) {
           await tx.customer.update({ where: { id: cust.id }, data: { balance: 0 } });
         }
         const finalCustomer = await tx.customer.findUnique({ where: { id: entry.customerId }, select: { id: true, name: true, phone: true, balance: true } });
@@ -374,7 +432,7 @@ ledger.delete("/:id", async (c) => {
       if (entry.status === "pending") {
         await tx.customer.update({ where: { id: entry.customerId }, data: { balance: { decrement: entry.amount } } });
         const cust = await tx.customer.findUnique({ where: { id: entry.customerId } });
-        if (cust && cust.balance < 0) await tx.customer.update({ where: { id: cust.id }, data: { balance: 0 } });
+        if (cust && dec(cust.balance) < 0) await tx.customer.update({ where: { id: cust.id }, data: { balance: 0 } });
       }
       await tx.ledgerEntry.update({ where: { id }, data: { deletedAt: new Date() } as any });
     });
