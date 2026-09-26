@@ -34,12 +34,19 @@ async function hash(pw: string) {
 async function main() {
   console.log("[SEED] Seeding shops, counters, users...");
 
-  // Create default shop
+  // Create default shop (code is the human ID GB-SHOP-1001; never clobber on reseed)
   const defaultShop = await prisma.shop.upsert({
     where: { id: "shop_default" },
     update: { name: "Main Shop", isActive: true, deletedAt: null },
-    create: { id: "shop_default", name: "Main Shop", address: "Main Bazaar", isActive: true },
+    create: { id: "shop_default", code: "GB-SHOP-1001", name: "Main Shop", address: "Main Bazaar", isActive: true },
   });
+  // Backfill code for DBs seeded before the shop-code migration, then sync sequence
+  try {
+    await prisma.$executeRawUnsafe(`UPDATE "Shop" SET "code" = 'GB-SHOP-1001' WHERE "id" = 'shop_default' AND "code" IS NULL`);
+    await prisma.$executeRawUnsafe(`SELECT setval('shop_code_seq', GREATEST((SELECT COALESCE(MAX((regexp_replace("code", '^GB-SHOP-', '')::INT)), 1000) FROM "Shop") + 1, 1001), false)`);
+  } catch {
+    // sequence/table missing (migration not yet applied) — fresh migrate will handle it
+  }
   console.log(`[SEED] Shop: ${defaultShop.id} — ${defaultShop.name}`);
 
   // Backfill legacy receipt identity once (never clobber owner edits on reseed)

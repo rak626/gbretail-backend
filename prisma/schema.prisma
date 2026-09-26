@@ -8,6 +8,9 @@ datasource db {
 
 model Shop {
   id        String    @id @default(cuid())
+  // Human shop ID, auto-assigned GB-SHOP-1001, 1002… — shown in header/admin.
+  // Immutable after creation; cuid `id` stays the internal PK for all FKs.
+  code      String    @unique
   name      String
   address   String?
   isActive  Boolean   @default(true)

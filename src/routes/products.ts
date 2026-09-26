@@ -21,10 +21,16 @@ async function staffInventoryDenied(c: unknown): Promise<boolean> {
   }
 }
 
-// GET /api/products?search&category&limit&page&shopId
+// GET /api/products?search&category&limit&page&shopId&stock&sortBy&sortOrder
+// stock: all | in | low | out — low/out compare per-row stockQuantity vs lowStockThreshold.
+// sortBy: name | price | stock | category | recent — sortOrder: asc | desc
 products.get("/", async (c) => {
-  const search = (c.req.query("search") ?? "").toLowerCase();
+  const rawSearch = (c.req.query("search") ?? "").trim();
+  const search = rawSearch;
   const category = c.req.query("category") ?? "All";
+  const stock = (c.req.query("stock") ?? "all").toLowerCase();
+  const sortBy = (c.req.query("sortBy") ?? "name").toLowerCase();
+  const sortOrder = (c.req.query("sortOrder") ?? "asc").toLowerCase() === "desc" ? "desc" : "asc";
   const rawLimit = parseInt(c.req.query("limit") ?? "100", 10);
   const limit = isNaN(rawLimit) ? 100 : Math.min(Math.max(rawLimit, 1), 200);
   const rawPage = parseInt(c.req.query("page") ?? "1", 10);
@@ -52,11 +58,49 @@ products.get("/", async (c) => {
         (where as Record<string, unknown>).category = category;
       }
     }
+    // Stock-status filter. out/in are single-column; low needs a
+    // column-to-column compare (stockQuantity <= lowStockThreshold) which
+    // Prisma where cannot express — resolve matching ids via raw SQL first.
+    if (stock === "out") {
+      (where as Record<string, unknown>).stockQuantity = { lte: 0 };
+    } else if (stock === "in") {
+      (where as Record<string, unknown>).stockQuantity = { gt: 0 };
+    } else if (stock === "low") {
+      try {
+        const stockConds: Prisma.Sql[] = [Prisma.sql`"deletedAt" IS NULL`];
+        if (shopId) stockConds.push(Prisma.sql`"shopId" = ${shopId}`);
+        // mirror base filters so counts stay consistent with the table
+        if (search) stockConds.push(Prisma.sql`("name" ILIKE ${`%${search}%`} OR "barcode" ILIKE ${`%${search}%`})`);
+        if (category && category !== "All") {
+          if (category === "Loose Items") stockConds.push(Prisma.sql`"is_loose" = true`);
+          else stockConds.push(Prisma.sql`"category" = ${category}`);
+        }
+        const lowIds = await prisma.$queryRaw<Array<{ id: string }>>(
+          Prisma.sql`SELECT "id" FROM "Product" WHERE ${Prisma.join(stockConds, " AND ")} AND "stockQuantity" > 0 AND "stockQuantity" <= "lowStockThreshold" LIMIT 5000`
+        );
+        const ids = lowIds.map((r) => r.id);
+        if (ids.length === 0) return c.json({ products: [], total: 0, page, limit, source: "db" });
+        (where as Record<string, unknown>).id = { in: ids };
+      } catch {
+        return c.json({ error: "Failed to load products" }, 500);
+      }
+    }
+
+    const orderBy =
+      sortBy === "stock"
+        ? { stockQuantity: sortOrder }
+        : sortBy === "price"
+          ? [{ price: sortOrder }, { rate_per_kg: sortOrder }, { name: "asc" }]
+          : sortBy === "category"
+            ? [{ category: sortOrder }, { name: "asc" }]
+            : sortBy === "recent"
+              ? { updatedAt: sortOrder }
+              : { name: sortOrder };
 
     const [items, total] = await Promise.all([
       prisma.product.findMany({
         where,
-        orderBy: { name: "asc" },
+        orderBy: orderBy as never,
         take: limit,
         skip: (page - 1) * limit,
       }),
@@ -71,9 +115,10 @@ products.get("/", async (c) => {
   }
 });
 
-// GET /api/products/meta — shop-wide totals + categories (must be before /:id).
+// GET /api/products/meta — shop-wide totals + categories + stock value (must be before /:id).
 // Header KPIs must not depend on table pagination; low/out compare per-row
 // stockQuantity against that row's own lowStockThreshold.
+// stockValueCost = SUM(stock*qty cost), stockValueSell = SUM(stock*qty sell price/rate).
 products.get("/meta", async (c) => {
   const user = (c as any).get("user" as any) as any;
   const shopId = ((c as any).get("shopId" as any) as string | null) || c.req.query("shopId") || user?.shopId || null;
@@ -81,8 +126,8 @@ products.get("/meta", async (c) => {
     if (!shopId && user?.role !== "SUPER_ADMIN") return c.json({ error: "Shop not assigned — contact admin", code: "NO_SHOP" }, 403);
     const conds: Prisma.Sql[] = [Prisma.sql`"deletedAt" IS NULL`];
     if (shopId) conds.push(Prisma.sql`"shopId" = ${shopId}`);
-    const rows = await prisma.$queryRaw<Array<{ total: number; low: number; out: number }>>(
-      Prisma.sql`SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE "stockQuantity" <= "lowStockThreshold")::int AS low, COUNT(*) FILTER (WHERE "stockQuantity" <= 0)::int AS out FROM "Product" WHERE ${Prisma.join(conds, " AND ")}`
+    const rows = await prisma.$queryRaw<Array<{ total: number; low: number; out: number; valuecost: number; valuesell: number }>>(
+      Prisma.sql`SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE "stockQuantity" <= "lowStockThreshold")::int AS low, COUNT(*) FILTER (WHERE "stockQuantity" <= 0)::int AS out, COALESCE(SUM("stockQuantity" * "costPrice"), 0)::float AS valuecost, COALESCE(SUM("stockQuantity" * COALESCE("price", "rate_per_kg", 0)), 0)::float AS valuesell FROM "Product" WHERE ${Prisma.join(conds, " AND ")}`
     );
     const cats = await prisma.product.findMany({
       where: { deletedAt: null, ...(shopId ? { shopId } : {}) } as any,
@@ -90,10 +135,10 @@ products.get("/meta", async (c) => {
       distinct: ["category"],
       orderBy: { category: "asc" },
     });
-    const agg = rows[0] ?? { total: 0, low: 0, out: 0 };
-    return c.json({ total: agg.total, low: agg.low, out: agg.out, categories: cats.map((r) => r.category) });
+    const agg = rows[0] ?? { total: 0, low: 0, out: 0, valuecost: 0, valuesell: 0 };
+    return c.json({ total: agg.total, low: agg.low, out: agg.out, stockValueCost: agg.valuecost ?? 0, stockValueSell: agg.valuesell ?? 0, categories: cats.map((r) => r.category) });
   } catch (e) {
-    return c.json({ error: "Failed to load product stats", total: 0, low: 0, out: 0, categories: [] }, 500);
+    return c.json({ error: "Failed to load product stats", total: 0, low: 0, out: 0, stockValueCost: 0, stockValueSell: 0, categories: [] }, 500);
   }
 });
 

@@ -45,7 +45,7 @@ All routes under `/api`:
 
 - `GET  /api/health` — DB check
 - `GET  /api/stats`
-- `GET  /api/products?search&category&limit` + `POST /api/products` + `GET/PATCH/DELETE /api/products/:id`
+- `GET  /api/products?search&category&limit&page&stock&sortBy&sortOrder` + `POST /api/products` + `GET/PATCH/DELETE /api/products/:id` (+ `POST /:id/restore`; barcode unique per shop)
 - `GET  /api/customers?q&limit` + `POST /api/customers` + `GET/PATCH /api/customers/:id`
 - `GET  /api/orders?page&limit&customerId&paymentMethod&search&date` + `POST /api/orders` + `GET /api/orders/:id` + `GET /api/orders/next-number`
 - `GET  /api/ledger?filter&q&customerId&page&limit&due` + `GET /api/ledger/due-today?q&includeOverdue` + `POST /api/ledger` + `GET/PATCH/DELETE /api/ledger/:id`

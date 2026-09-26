@@ -4,6 +4,15 @@ import { requireAuth, requireRole } from "../middleware/auth.js";
 
 const shops = new Hono();
 
+// Human shop ID: GB-SHOP-1001, 1002… Auto-only, immutable after creation.
+// Uses the shop_code_seq sequence created in 20260927000000_shop_code.
+async function allocateShopCode(): Promise<string> {
+  const rows = await prisma.$queryRaw<Array<{ code: string }>>`SELECT 'GB-SHOP-' || nextval('shop_code_seq') AS code`;
+  const code = rows[0]?.code;
+  if (!code || !/^GB-SHOP-\d+$/.test(code)) throw new Error("Failed to allocate shop code");
+  return code;
+}
+
 // Receipt identity fields (per-shop billing header). Shared by POST + PATCH.
 // Returns the validated partial, or an error string. `partial` skips absent keys.
 function receiptFields(body: Record<string, unknown>, partial = false): Record<string, unknown> | string {
@@ -88,7 +97,7 @@ shops.post("/", requireRole("SUPER_ADMIN") as any, async (c) => {
     if (name.length > 100) return c.json({ error: "Name too long" }, 400);
     const receipt = receiptFields(body);
     if (typeof receipt === "string") return c.json({ error: receipt }, 400);
-    const shop = await prisma.shop.create({ data: { name, address, ...receipt } });
+    const shop = await prisma.shop.create({ data: { name, address, code: await allocateShopCode(), ...receipt } });
     return c.json({ shop }, 201);
   } catch (e) {
     return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);
@@ -103,6 +112,7 @@ shops.patch("/:id", async (c) => {
   if (user.role === "STAFF") return c.json({ error: "Forbidden — staff cannot edit shop" }, 403);
   try {
     const body = await c.req.json();
+    if (body.code !== undefined) return c.json({ error: "Shop code is auto-assigned and cannot be changed" }, 400);
     const data: Record<string, unknown> = {};
     if (body.name !== undefined) {
       const n = String(body.name).trim();
