@@ -5,7 +5,7 @@ compatibility_flags = ["nodejs_compat"]
 
 [vars]
 PORT = "8787"
-CORS_ORIGIN = "http://localhost:3000"
+CORS_ORIGIN = "http://localhost:3000,http://localhost:3001"
 USE_NEON = "1"
 NODE_ENV = "production"
 WORKER = "1"

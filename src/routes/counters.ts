@@ -118,6 +118,7 @@ counters.patch("/:id", requireRole("SUPER_ADMIN", "SHOP_OWNER") as any, async (c
 // DELETE /api/counters/:id — soft delete + auto-unassign attached staff
 // (their counterId is cleared; they fall back to the emptiest counter at
 // next login and show as Auto on the Users page).
+// Atomic: staff unassign + counter soft-delete in one tx.
 counters.delete("/:id", requireRole("SUPER_ADMIN", "SHOP_OWNER") as any, async (c) => {
   const user = (c as any).get("user" as any) as any;
   const id = c.req.param("id");
@@ -125,9 +126,14 @@ counters.delete("/:id", requireRole("SUPER_ADMIN", "SHOP_OWNER") as any, async (
     const counter = await prisma.counter.findUnique({ where: { id } });
     if (!counter || (counter as any).deletedAt) return c.json({ error: "Not found or already deleted" }, 404);
     if (user.role !== "SUPER_ADMIN" && (counter as any).shopId !== user.shopId) return c.json({ error: "Forbidden" }, 403);
-    const unassign = await prisma.user.updateMany({ where: { counterId: id, deletedAt: null }, data: { counterId: null } });
-    const updated = await prisma.counter.update({ where: { id }, data: { deletedAt: new Date(), isActive: false } });
-    return c.json({ counter: updated, softDeleted: true, unassignedStaff: unassign.count });
+    const { unassignCount, updated } = await prisma.$transaction(async (tx) => {
+      const unassign = await tx.user.updateMany({ where: { counterId: id, deletedAt: null }, data: { counterId: null } });
+      const upd = await tx.counter.updateMany({ where: { id, deletedAt: null }, data: { deletedAt: new Date(), isActive: false } });
+      if (upd.count === 0) throw Object.assign(new Error("Not found or already deleted"), { status: 404 });
+      const fresh = await tx.counter.findUnique({ where: { id } });
+      return { unassignCount: unassign.count, updated: fresh };
+    });
+    return c.json({ counter: updated, softDeleted: true, unassignedStaff: unassignCount });
   } catch (e) {
     const { toAppError: toAppErr2 } = await import("../lib/errors.js");
     const appErr = toAppErr2(e);

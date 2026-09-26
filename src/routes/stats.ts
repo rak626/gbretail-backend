@@ -1,7 +1,9 @@
 import { Hono } from "hono";
 import { prisma } from "../lib/prisma.js";
+import { getShopScope } from "../lib/shopScope.js";
 import { requireAuth } from "../middleware/auth.js";
 import { dec, round2 } from "../lib/money.js";
+import { startOfDay, endOfDay } from "../lib/utils.js";
 
 const stats = new Hono();
 
@@ -9,12 +11,10 @@ stats.use("*", requireAuth as any);
 
 stats.get("/", async (c) => {
   const user = (c as any).get("user" as any) as any;
-  const shopId = ((c as any).get("shopId" as any) as string | null) || user?.shopId || c.req.query("shopId") || null;
+  const { shopId } = getShopScope(c);
   try {
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
-    const todayEnd = new Date();
-    todayEnd.setHours(23, 59, 59, 999);
+    const todayStart = startOfDay(new Date());
+    const todayEnd = endOfDay(new Date());
 
     const shopFilter: Record<string, unknown> = shopId ? { shopId } : {};
     const accessError = !shopId && user.role !== "SUPER_ADMIN" ? true : false;
@@ -29,8 +29,8 @@ stats.get("/", async (c) => {
     ]);
 
     // Per-product low-stock: warn when stockQuantity <= that product's own threshold
-    const lowStock = (stockCandidates as Array<{ id: string; name: string; stockQuantity: number; lowStockThreshold: number | null; unit: string; shopId: string | null }>)
-      .filter((p) => (p.stockQuantity ?? 0) <= (p.lowStockThreshold ?? 10))
+    const lowStock = (stockCandidates as Array<{ id: string; name: string; stockQuantity: unknown; lowStockThreshold: unknown; unit: string; shopId: string }>)
+      .filter((p) => dec(p.stockQuantity) <= dec(p.lowStockThreshold ?? 10))
       .slice(0, 5);
 
     const todayRevenue = round2(todayOrders.reduce((s: number, o) => s + dec((o as any).total), 0));
@@ -51,9 +51,12 @@ stats.get("/", async (c) => {
       lowStock,
     });
   } catch (e) {
+    const { toAppError: toAppErrStats } = await import("../lib/errors.js");
+    const appErr = toAppErrStats(e);
     return c.json(
       {
-        error: e instanceof Error ? e.message : "Failed",
+        error: appErr.message,
+        code: appErr.code,
         today: { orders: 0, revenue: 0, byPayment: {} },
         total: { orders: 0, revenue: 0, customers: 0 },
         lowStock: [],

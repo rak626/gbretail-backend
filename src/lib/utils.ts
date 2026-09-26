@@ -42,8 +42,7 @@ export function generateOrderNumber(date = new Date()) {
 }
 
 export async function getNextOrderNumber(prisma: { order: { count: (a: unknown) => Promise<number> } }) {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
+  const today = startOfDay(new Date());
   const count = await prisma.order.count({
     where: { createdAt: { gte: today }, deletedAt: null } as any,
   });

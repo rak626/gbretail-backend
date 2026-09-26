@@ -299,10 +299,10 @@ export function allocateDiscountToItems(items: ProfitInput[], discount: number, 
   return items.map(it => (Number(it.lineTotal) / gross) * discount);
 }
 
-// Ledger aging
+// Ledger aging (IST day boundaries — server runs UTC, billing day is Asia/Kolkata)
 export function getLedgerAgingBucket(dueDate: Date, now: Date = new Date()): string {
-  const start = new Date(dueDate); start.setHours(0,0,0,0);
-  const n = new Date(now); n.setHours(0,0,0,0);
+  const start = startOfDay(new Date(dueDate));
+  const n = startOfDay(new Date(now));
   const diffDays = Math.floor((n.getTime() - start.getTime()) / (1000*60*60*24));
   // diff negative => due in future, bucket "0-7" future but we separate as "due-future"? For simplicity, future counts as "0-7" pending not overdue.
   // But for pending ageing we want overdue buckets only. If diff <0 => "Not due"

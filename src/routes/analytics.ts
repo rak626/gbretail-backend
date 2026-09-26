@@ -13,6 +13,8 @@ import {
 } from "../lib/analytics.js";
 import { requireAuth } from "../middleware/auth.js";
 import { startOfDay } from "../lib/utils.js";
+import { getShopScope, superShopOverride } from "../lib/shopScope.js";
+import { toAppError } from "../lib/errors.js";
 
 const analytics = new Hono();
 
@@ -26,9 +28,10 @@ function cacheKey(c: any) {
   // shop-scoped, so a shared URL key would leak one shop/role's data to another.
   // SUPER_ADMIN switches shops via x-shop-id; include the header explicitly.
   const u = (c as any).get("user" as any) as any;
-  const shopId = ((c as any).get("shopId" as any) as string | null) || u?.shopId || c.req.query("shopId") || c.req.header("x-shop-id") || c.req.header("X-Shop-Id") || "";
+  const { shopId } = getShopScope(c);
+  const shopKey = shopId || "";
   const url = c.req.url;
-  return `${u?.userId ?? "?"}:${u?.role ?? "?"}:${shopId}:${url}`;
+  return `${u?.userId ?? "?"}:${u?.role ?? "?"}:${shopKey}:${url}`;
 }
 function getCached(key: string) {
   const v = cache.get(key);
@@ -43,6 +46,12 @@ function setCached(key: string, data: any) {
   }
 }
 
+// Called by order/ledger mutations so KPIs never serve >30s-stale data
+// across writes. Per-isolate (documented); each isolate clears on its own writes.
+export function invalidateAnalyticsCache() {
+  cache.clear();
+}
+
 // GET /api/analytics/summary?preset=7d&from&to&granularity&topN&category
 analytics.get("/summary", async (c) => {
   const presetRaw = c.req.query("preset") ?? c.req.query("range") ?? "7d";
@@ -53,7 +62,7 @@ analytics.get("/summary", async (c) => {
   const categoryFilter = (c.req.query("category") ?? "All").trim();
 
   const user = (c as any).get("user" as any) as any;
-  const shopId = ((c as any).get("shopId" as any) as string | null) || user?.shopId || c.req.query("shopId") || null;
+  const { shopId } = getShopScope(c);
   if (!shopId && user.role !== "SUPER_ADMIN") return c.json({ error: "Shop not assigned" }, 403);
   const shopFilter: Record<string, unknown> = shopId ? { shopId } : {};
 
@@ -80,7 +89,7 @@ analytics.get("/summary", async (c) => {
     const [orders, prevOrders, ledgerCreated, ledgerSettled, ledgerPending] = await Promise.all([
       prisma.order.findMany({
         where: whereCurrent,
-        include: { items: true },
+        select: { id: true, total: true, discount: true, paymentMethod: true, cashAmount: true, upiAmount: true, createdAt: true, items: { select: { productId: true, name: true, category: true, price: true, costPrice: true, quantity: true, weight: true, lineTotal: true } } },
         orderBy: { createdAt: "asc" },
       }),
       prisma.order.findMany({
@@ -393,7 +402,8 @@ analytics.get("/summary", async (c) => {
     setCached(ck, result);
     return c.json(result);
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed to fetch analytics", timeseries: [], topProducts: [], categories: [] }, 500);
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code, timeseries: [], topProducts: [], categories: [] }, 500);
   }
 });
 
@@ -521,18 +531,23 @@ analytics.get("/sections", async (c) => {
         where: { deletedAt: null, ...(scopeShopId ? { id: scopeShopId } : {}) },
         select: { id: true, name: true, isActive: true },
         orderBy: { name: "asc" },
+        take: 100,
       });
-      const perShop = await Promise.all(
-        (shopList as any[]).map(async (s) => {
-          const so = await prisma.order.findMany({
-            where: { shopId: s.id, createdAt: { gte: start, lte: end }, deletedAt: null },
-            select: { total: true },
-          });
-          const revenue = so.reduce((a, o) => a + Number((o as any).total ?? 0), 0);
-          return { id: s.id, name: s.name, isActive: (s as any).isActive, orders: so.length, revenue: Number(revenue.toFixed(2)), avgBill: so.length ? Number((revenue / so.length).toFixed(2)) : 0 };
-        })
-      );
-      shops = perShop;
+      const shopIds = shopList.map((s) => s.id);
+      const grouped = await prisma.order.groupBy({
+        by: ["shopId"],
+        where: { shopId: { in: shopIds }, createdAt: { gte: start, lte: end }, deletedAt: null },
+        _count: { _all: true },
+        _sum: { total: true },
+        _avg: { total: true },
+      });
+      const byShop = new Map(grouped.map((g: any) => [g.shopId, g]));
+      shops = (shopList as any[]).map((s) => {
+        const g: any = byShop.get(s.id);
+        const revenue = Number(g?._sum?.total ?? 0);
+        const count = g?._count?._all ?? 0;
+        return { id: s.id, name: s.name, isActive: (s as any).isActive, orders: count, revenue: Number(revenue.toFixed(2)), avgBill: count ? Number((revenue / count).toFixed(2)) : 0 };
+      });
     } else if (scopeShopId) {
       const counterList = await prisma.counter.findMany({
         where: { shopId: scopeShopId, deletedAt: null },
@@ -557,7 +572,8 @@ analytics.get("/sections", async (c) => {
     setCached(ck, result);
     return c.json(result);
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed to fetch breakdowns" }, 500);
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code }, 500);
   }
 });
 
@@ -569,7 +585,7 @@ analytics.get("/export", async (c) => {
   const granularityRaw = c.req.query("granularity");
   const format = (c.req.query("format") ?? "csv").toLowerCase();
   const user = (c as any).get("user" as any) as any;
-  const shopId = ((c as any).get("shopId" as any) as string | null) || user?.shopId || c.req.query("shopId") || null;
+  const { shopId } = getShopScope(c);
   if (!shopId && user.role !== "SUPER_ADMIN") return c.json({ error: "Shop not assigned" }, 403);
   const shopFilter: Record<string, unknown> = shopId ? { shopId } : {};
 
@@ -582,10 +598,10 @@ analytics.get("/export", async (c) => {
 
     // Reuse summary logic by internal fetch? Instead duplicate light query for export: timeseries + topProducts + categories
     // For export we need flat CSV: section timeseries, top products, categories, ledger aging
-    // Fetch orders
+    // Fetch orders (narrow select — never include full customer/shop joins for export)
     const orders = await prisma.order.findMany({
       where: { createdAt: { gte: start, lte: end }, deletedAt: null, ...shopFilter } as any,
-      include: { items: true },
+      select: { id: true, total: true, discount: true, paymentMethod: true, cashAmount: true, upiAmount: true, createdAt: true, items: { select: { name: true, category: true, price: true, costPrice: true, quantity: true, weight: true, lineTotal: true } } },
       orderBy: { createdAt: "asc" },
     });
     const ledgerPending = await prisma.ledgerEntry.findMany({
@@ -658,7 +674,13 @@ analytics.get("/export", async (c) => {
       return c.json({ range: { start: start.toISOString(), end: end.toISOString(), label: bounds.label, granularity }, kpis:{ orders: orders.length, gross, discount, net, profit: profitNet, tender: { splitCash: tenderCash, splitUpi: tenderUpi } }, timeseries, topProducts, categories, aging: Array.from(agingMap.entries()).map(([bucket, v])=>({bucket, ...v})) });
     }
 
-    // CSV
+    // CSV — escape quotes AND formula injection (=,+,-,@,tab/CR at cell start)
+    const csvCell = (v: unknown): string => {
+      let s = String(v ?? "");
+      if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+      if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+      return s;
+    };
     let csv = "";
     csv += `GB Retail Analytics Export - ${bounds.label} (${start.toISOString().slice(0,10)} to ${end.toISOString().slice(0,10)}) granularity:${granularity}\n`;
     csv += `Generated: ${new Date().toISOString()}\n\n`;
@@ -674,24 +696,25 @@ analytics.get("/export", async (c) => {
     csv += `\nTop Products (qty)\n`;
     csv += `Name,Category,Qty,Gross,Profit\n`;
     for (const p of topProducts) {
-      csv += `"${p.name.replace(/"/g,'""')}",${p.category},${p.qty},${p.gross.toFixed(2)},${p.profit.toFixed(2)}\n`;
+      csv += `${csvCell(p.name)},${csvCell(p.category)},${p.qty},${p.gross.toFixed(2)},${p.profit.toFixed(2)}\n`;
     }
     csv += `\nCategories\n`;
     csv += `Category,Gross,Net,Profit,Qty\n`;
     for (const cat of categories) {
-      csv += `${cat.category},${cat.gross.toFixed(2)},${cat.net.toFixed(2)},${cat.profit.toFixed(2)},${cat.qty}\n`;
+      csv += `${csvCell(cat.category)},${cat.gross.toFixed(2)},${cat.net.toFixed(2)},${cat.profit.toFixed(2)},${cat.qty}\n`;
     }
     csv += `\nLedger Aging (pending only)\n`;
     csv += `Bucket,Count,Amount\n`;
     for (const [bucket, v] of agingMap.entries()) {
-      csv += `${bucket},${v.count},${v.amount.toFixed(2)}\n`;
+      csv += `${csvCell(bucket)},${v.count},${v.amount.toFixed(2)}\n`;
     }
 
     c.header("Content-Type", "text/csv; charset=utf-8");
     c.header("Content-Disposition", `attachment; filename="analytics-${bounds.preset}-${new Date().toISOString().slice(0,10)}.csv"`);
     return c.text(csv);
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Export failed" }, 500);
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code }, 500);
   }
 });
 

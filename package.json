@@ -13,8 +13,12 @@
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
     "db:seed": "tsx prisma/seed.ts",
-    "db:push": "prisma db push",
-    "db:backfill": "tsx scripts/backfill.ts"
+    "db:extensions": "tsx scripts/db-extensions.ts",
+    "db:prune-sessions": "tsx scripts/prune-sessions.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:unit": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.7",
@@ -37,6 +41,7 @@
     "prisma": "^7.10.0",
     "tsx": "^4.23.15",
     "typescript": "^5",
+    "vitest": "^3.2.7",
     "wrangler": "^3.110.3"
   }
 }

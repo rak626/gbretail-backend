@@ -1,9 +1,10 @@
 import { Hono } from "hono";
 import { prisma } from "../lib/prisma.js";
-import { computeDueDate, generateOrderNumber } from "../lib/utils.js";
+import { computeDueDate, generateOrderNumber, startOfDay, endOfDay } from "../lib/utils.js";
 import { normalizePhone } from "../lib/normalize.js";
 import { toAppError, AppError } from "../lib/errors.js";
 import { requireAuth } from "../middleware/auth.js";
+import { getShopScope } from "../lib/shopScope.js";
 import { resolveStaffCounter } from "../lib/staffCounter.js";
 import { round2, parseMoney, dec, MAX_MONEY } from "../lib/money.js";
 import { getIdempotencyKey, isValidIdempotencyKey, fingerprint } from "../lib/idempotency.js";
@@ -12,49 +13,44 @@ const orders = new Hono();
 
 orders.use("*", requireAuth as any);
 
-// Helper to get shop scope
-function getShopScope(c: any) {
-  const user = (c as any).get("user") as any;
-  const shopId = ((c as any).get("shopId") as string | null) || user?.shopId || c.req.query("shopId") || null;
-  return { user, shopId };
+// Per-shop sequential bill numbers via ShopOrderSeq (atomic increment, no races).
+// Format: ORD-YYYYMMDD-<SHOP4>-<NNNN> e.g. ORD-20250115-EF12-0042.
+// Monotonic per shop (not per day) — globally unique via shop suffix + seq.
+function istDateParts(d = new Date()): { yyyy: string; mm: string; dd: string } {
+  const fmt = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" });
+  const parts = fmt.formatToParts(d);
+  const map: Record<string, string> = {};
+  for (const p of parts) map[p.type] = p.value;
+  return { yyyy: map.year, mm: map.month, dd: map.day };
 }
-
-// Per-shop next number: count orders in shop today, with shop suffix to keep global unique + random tail for concurrency.
-// NOTE: count+1 is inherently racy — callers must retry on P2002 (see POST / below).
 async function getNextShopOrderNumber(tx: any, shopId: string | null) {
   if (!shopId) return generateOrderNumber();
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const count = await tx.order.count({ where: { shopId, createdAt: { gte: today }, deletedAt: null } as any });
-  const yyyy = today.getFullYear();
-  const mm = String(today.getMonth() + 1).padStart(2, "0");
-  const dd = String(today.getDate()).padStart(2, "0");
-  const seq = String(count + 1).padStart(3, "0");
-  const shopShort = shopId.slice(-4).toUpperCase();
-  // add 2-char random to avoid concurrent duplicate on same seq
-  const rand = Math.random().toString(36).substring(2, 4).toUpperCase();
-  return `ORD-${yyyy}${mm}${dd}-${shopShort}-${seq}${rand}`;
+  const row = await tx.shopOrderSeq.upsert({
+    where: { shopId },
+    update: { lastNo: { increment: 1 } },
+    create: { shopId, lastNo: 1 },
+  });
+  const seqNo = (row as any).lastNo as number;
+  const { yyyy, mm, dd } = istDateParts();
+  const shopShort = shopId.slice(-4).toUpperCase().padStart(4, "0");
+  const seq = String(seqNo).padStart(4, "0");
+  return `ORD-${yyyy}${mm}${dd}-${shopShort}-${seq}`;
 }
 
 // GET /api/orders/next-number (must be before /:id)
-// Preview only — actual orderNumber includes a random tail and may differ.
+// Preview only — reads ShopOrderSeq without incrementing; POST / is authoritative.
 // Do not use for idempotency; POST / returns the authoritative number.
 orders.get("/next-number", async (c) => {
   const { user, shopId } = getShopScope(c);
   try {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const where: Record<string, unknown> = { createdAt: { gte: today }, deletedAt: null } as any;
-    if (shopId) (where as any).shopId = shopId;
-    else if (user.role !== "SUPER_ADMIN") return c.json({ error: "Shop not assigned" }, 403);
-    const count = await prisma.order.count({ where } as any);
-    const yyyy = today.getFullYear();
-    const mm = String(today.getMonth() + 1).padStart(2, "0");
-    const dd = String(today.getDate()).padStart(2, "0");
-    const seq = String(count + 1).padStart(3, "0");
-    const shopShort = shopId ? shopId.slice(-4).toUpperCase() : "";
-    const orderNumber = shopId ? `ORD-${yyyy}${mm}${dd}-${shopShort}-${seq}` : `ORD-${yyyy}${mm}${dd}-${seq}`;
-    return c.json({ orderNumber, preview: true, count });
+    if (!shopId && user.role !== "SUPER_ADMIN") return c.json({ error: "Shop not assigned" }, 403);
+    if (!shopId) return c.json({ error: "shopId required for preview" }, 400);
+    const seqRow = await prisma.shopOrderSeq.findUnique({ where: { shopId } });
+    const nextNo = ((seqRow as any)?.lastNo ?? 0) + 1;
+    const { yyyy, mm, dd } = istDateParts();
+    const shopShort = shopId.slice(-4).toUpperCase().padStart(4, "0");
+    const seq = String(nextNo).padStart(4, "0");
+    return c.json({ orderNumber: `ORD-${yyyy}${mm}${dd}-${shopShort}-${seq}`, preview: true, count: nextNo });
   } catch {
     const d = new Date();
     const yyyy = d.getFullYear();
@@ -68,11 +64,13 @@ orders.get("/next-number", async (c) => {
 // GET /api/orders?page&limit&customerId&paymentMethod&search&customer&date&from&to
 // search = order number (kept backward-compat), customer = customer name/phone,
 // date = single day (legacy), from/to = YYYY-MM-DD range (preferred)
+// Pagination: legacy ?page&limit (deprecated) OR cursor ?cursor&limit → { nextCursor }.
 orders.get("/", async (c) => {
-  const rawLimit = parseInt(c.req.query("limit") ?? "50", 10);
-  const limit = isNaN(rawLimit) ? 50 : Math.min(rawLimit, 100);
+  const { parseLimit, decodeCursor, encodeCursor, cursorWhere } = await import("../lib/pagination.js");
+  const limit = parseLimit(c.req.query("limit") ?? "50", 50, 100);
   const rawPage = parseInt(c.req.query("page") ?? "1", 10);
   const page = isNaN(rawPage) ? 1 : Math.max(rawPage, 1);
+  const cursorParam = c.req.query("cursor") ?? null;
   const customerId = c.req.query("customerId");
   const paymentMethod = (c.req.query("paymentMethod") ?? "").trim();
   const search = (c.req.query("search") ?? "").trim();
@@ -101,18 +99,16 @@ orders.get("/", async (c) => {
       };
     }
     if (from || to) {
-      const start = from ? new Date(from) : new Date(to as string);
-      start.setHours(0, 0, 0, 0);
-      const end = to ? new Date(to) : new Date(from as string);
-      end.setHours(23, 59, 59, 999);
+      const rawStart = from ? new Date(from) : new Date(to as string);
+      const rawEnd = to ? new Date(to) : new Date(from as string);
+      const start = startOfDay(rawStart);
+      const end = endOfDay(rawEnd);
       if (!isNaN(start.getTime()) && !isNaN(end.getTime()) && start <= end) {
         where.createdAt = { gte: start, lte: end };
       }
     } else if (date) {
-      const start = new Date(date);
-      start.setHours(0, 0, 0, 0);
-      const end = new Date(date);
-      end.setHours(23, 59, 59, 999);
+      const start = startOfDay(new Date(date));
+      const end = endOfDay(new Date(date));
       if (!isNaN(start.getTime()) && !isNaN(end.getTime())) {
         where.createdAt = { gte: start, lte: end };
       }
@@ -120,6 +116,24 @@ orders.get("/", async (c) => {
     // optional counter filter
     const counterIdQ = c.req.query("counterId");
     if (counterIdQ) (where as any).counterId = counterIdQ;
+
+    if (cursorParam) {
+      const decoded = decodeCursor(cursorParam);
+      if (!decoded) return c.json({ error: "Invalid cursor", code: "INVALID_CURSOR" }, 400);
+      const cw = cursorWhere(decoded);
+      const cursorWhereClause = { AND: [where, cw] };
+      const rows = await prisma.order.findMany({
+        where: cursorWhereClause as any,
+        include: { items: true, customer: { select: { id: true, name: true, phone: true } }, shop: { select: { id: true, name: true } }, counter: { select: { id: true, name: true } }, user: { select: { id: true, name: true, email: true } } },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        take: limit + 1,
+      });
+      const hasMore = rows.length > limit;
+      const items = hasMore ? rows.slice(0, limit) : rows;
+      const last = items[items.length - 1] as any;
+      const nextCursor = hasMore && last ? encodeCursor(last.createdAt, last.id) : null;
+      return c.json({ orders: items, nextCursor, limit });
+    }
 
     const [items, total] = await Promise.all([
       prisma.order.findMany({
@@ -134,7 +148,8 @@ orders.get("/", async (c) => {
 
     return c.json({ orders: items, total, page, limit });
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed to fetch orders", orders: [], total: 0 }, 500);
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code, orders: [], total: 0 }, 500);
   }
 });
 
@@ -153,7 +168,8 @@ orders.get("/:id", async (c) => {
     }
     return c.json({ order });
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Error" }, 500);
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code }, 500);
   }
 });
 
@@ -166,8 +182,13 @@ orders.post("/", async (c) => {
   try {
     const body = await c.req.json();
     const user = (c as any).get("user") as any;
-    const urlShopId = c.req.query("shopId") as string | undefined;
-    let shopId: string | null = ((c as any).get("shopId") as string | null) || user?.shopId || (urlShopId as string | null) || (body.shopId ? String(body.shopId) : null);
+    // Pinned to JWT shop for OWNER/STAFF; SUPER_ADMIN may pass body.shopId/?shopId.
+    const { shopId: ctxShop } = getShopScope(c);
+    const { superShopOverride } = await import("../lib/shopScope.js");
+    let shopId: string | null = ctxShop ?? user?.shopId ?? null;
+    if (user.role === "SUPER_ADMIN") {
+      shopId = superShopOverride(c, body as Record<string, unknown>) ?? shopId;
+    }
     if (user.role !== "SUPER_ADMIN" && !shopId) return c.json({ error: "Shop not assigned" }, 403);
     if (user.role === "SUPER_ADMIN" && !shopId) return c.json({ error: "shopId required for SUPER_ADMIN" }, 400);
 
@@ -397,9 +418,22 @@ orders.post("/", async (c) => {
         .filter((it) => !it.isCustom && it.productId)
         .map((it) => String(it.productId));
       const dbProds = prodIds.length
-        ? await tx.product.findMany({ where: { id: { in: prodIds } }, select: { id: true, costPrice: true } })
+        ? await tx.product.findMany({ where: { id: { in: prodIds } }, select: { id: true, costPrice: true, shopId: true, deletedAt: true, stockQuantity: true } })
         : [];
       const costMap = new Map<string, number>(dbProds.map((p) => [p.id, dec((p as any).costPrice)]));
+      const prodById = new Map(dbProds.map((p) => [p.id, p]));
+      // Fail fast on missing/foreign/deleted products before creating the order
+      for (const it of items as Record<string, unknown>[]) {
+        if (!it.isCustom && it.productId) {
+          const pid = String(it.productId);
+          const prod = prodById.get(pid) as any;
+          if (!prod) throw new AppError(404, `Product ${(it as any).name} not found`);
+          if (prod.shopId && prod.shopId !== shopId && user.role !== "SUPER_ADMIN") {
+            throw new AppError(403, `Product ${(it as any).name} does not belong to your shop`);
+          }
+          if (prod.deletedAt) throw new AppError(404, `Product ${(it as any).name} is deleted`);
+        }
+      }
 
       // Create order with shop/counter/user tracking — orderNumber already shop-unique with random tail, no retry needed
       const createdOrder = await tx.order.create({
@@ -456,18 +490,13 @@ orders.post("/", async (c) => {
         });
       }
 
-      // Stock decrement — per shop, throw 409 if insufficient
+      // Stock decrement — conditional per-item (validated above in one batched fetch).
+      // N updateMany (atomic per row) + 1 batched after-read for warnings (was 3N).
+      const decrementedIds: string[] = [];
       for (const it of items as Record<string, unknown>[]) {
         if (!it.isCustom && it.productId) {
           const qty = Number(it.quantity ?? it.weight ?? 1);
           if (qty <= 0) continue;
-          // Verify product belongs to same shop
-          const prod = await tx.product.findUnique({ where: { id: String(it.productId) } });
-          if (!prod) throw new AppError(404, `Product ${(it as any).name} not found`);
-          if ((prod as any).shopId && (prod as any).shopId !== shopId && user.role !== "SUPER_ADMIN") {
-            throw new AppError(403, `Product ${(it as any).name} does not belong to your shop`);
-          }
-          if ((prod as any).deletedAt) throw new AppError(404, `Product ${(it as any).name} is deleted`);
           // Attempt conditional decrement
           const res = await tx.product.updateMany({
             where: { id: String(it.productId), stockQuantity: { gte: qty } },
@@ -476,16 +505,20 @@ orders.post("/", async (c) => {
           if ((res as any).count === 0) {
             // insufficient stock
             const fresh = await tx.product.findUnique({ where: { id: String(it.productId) }, select: { stockQuantity: true, name: true } });
-            throw new AppError(409, `Insufficient stock for ${fresh?.name ?? (it as any).name}. Available: ${fresh?.stockQuantity ?? 0}, requested: ${qty}`);
+            throw new AppError(409, `Insufficient stock for ${fresh?.name ?? (it as any).name}. Available: ${dec((fresh as any)?.stockQuantity) ?? 0}, requested: ${qty}`);
           }
-          // Warn-only: flag products now at/below their own threshold (never blocks the sale)
-          const after = await tx.product.findUnique({ where: { id: String(it.productId) }, select: { stockQuantity: true, name: true, lowStockThreshold: true, unit: true } });
-          if (after && (after.stockQuantity ?? 0) <= ((after as any).lowStockThreshold ?? 10)) {
+          decrementedIds.push(String(it.productId));
+        }
+      }
+      if (decrementedIds.length) {
+        const afters = await tx.product.findMany({ where: { id: { in: decrementedIds } }, select: { id: true, stockQuantity: true, name: true, lowStockThreshold: true, unit: true } });
+        for (const after of afters) {
+          if (dec((after as any).stockQuantity) <= dec((after as any).lowStockThreshold ?? 10)) {
             lowStockWarnings.push({
-              productId: String(it.productId),
+              productId: (after as any).id,
               name: (after as any).name,
-              stockQuantity: (after as any).stockQuantity ?? 0,
-              lowStockThreshold: (after as any).lowStockThreshold ?? 10,
+              stockQuantity: dec((after as any).stockQuantity),
+              lowStockThreshold: dec((after as any).lowStockThreshold ?? 10),
               unit: (after as any).unit ?? "pcs",
             });
           }
@@ -512,6 +545,12 @@ orders.post("/", async (c) => {
       throw new AppError(500, "Failed to create order");
     }
 
+    try {
+      const { invalidateAnalyticsCache } = await import("./analytics.js");
+      invalidateAnalyticsCache();
+    } catch {
+      // cache is best-effort
+    }
     return c.json({ order, lowStockWarnings }, 201);
   } catch (e) {
     // Race fallback: two same-key requests passed the pre-check together — the loser

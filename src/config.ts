@@ -1,6 +1,7 @@
 // Central configuration — single source for env parsing
 // Works in Node (process.env) and Workers (c.env bindings via applyEnv).
-import "dotenv/config";
+// NOTE: dotenv is loaded in src/index.ts (Node entry) and prisma.config.ts (CLI)
+// only — never import it here or it gets bundled into Workers.
 
 export type EnvBindings = Record<string, string | undefined>;
 

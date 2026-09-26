@@ -1,5 +1,5 @@
 // Exact-money helpers. DB stores NUMERIC(12,2); API speaks plain numbers rounded to 2dp.
-// Quantities (stock/weight/qty) stay Float and are NOT rounded here.
+// Quantities (stock/weight/qty) are NUMERIC(12,3) in DB, plain numbers on the API.
 
 export function round2(n: number): number {
   if (typeof n !== "number" || !isFinite(n)) return NaN;

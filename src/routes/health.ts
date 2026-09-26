@@ -5,7 +5,11 @@ const health = new Hono();
 
 health.get("/", async (c) => {
   try {
-    await prisma.$queryRaw`SELECT 1`;
+    // 2s timeout so load-balancer polls never hang the pool; uncached by design
+    // but cheap (SELECT 1) — callers should still poll no more often than 30s.
+    const probe = prisma.$queryRaw`SELECT 1`;
+    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("DB probe timeout")), 2000));
+    await Promise.race([probe, timeout]);
     return c.json({ status: "ok", db: "connected", timestamp: new Date().toISOString() });
   } catch (e) {
     // Sanitize — never leak connect strings / driver internals (see lib/errors.ts).

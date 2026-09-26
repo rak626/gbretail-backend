@@ -1,25 +1,16 @@
 import "dotenv/config";
 import { PrismaClient } from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
-import { neonConfig } from "@neondatabase/serverless";
-import { PrismaNeon } from "@prisma/adapter-neon";
-import ws from "ws";
 import bcrypt from "bcryptjs";
 import { products } from "../src/data/products";
 
-// Edge vs Node driver selection mirrors src/lib/prisma.ts
 function createPrisma() {
   const cs = process.env.DATABASE_URL!;
   if (!cs) throw new Error("DATABASE_URL not set");
   if (cs.startsWith("prisma://")) {
-    // Accelerate — no adapter needed, URL is prisma://
     return new PrismaClient();
   }
-  if (process.env.USE_NEON === "1" || cs.includes("neon.tech")) {
-    neonConfig.webSocketConstructor = ws;
-    const adapter = new PrismaNeon({ connectionString: cs });
-    return new PrismaClient({ adapter });
-  }
+  // Local dev is always plain pg TCP (Neon/edge only in Workers runtime).
   const adapter = new PrismaPg({ connectionString: cs });
   return new PrismaClient({ adapter });
 }
@@ -32,31 +23,53 @@ async function hash(pw: string) {
   return bcrypt.hash(pw, salt);
 }
 
+async function upsertUserByEmail(data: {
+  email: string;
+  name: string;
+  passwordHash: string;
+  role: "SUPER_ADMIN" | "SHOP_OWNER" | "STAFF";
+  shopId: string | null;
+}) {
+  const existing = await prisma.user.findFirst({ where: { email: data.email, deletedAt: null } });
+  if (existing) {
+    return prisma.user.update({
+      where: { id: existing.id },
+      data: { name: data.name, passwordHash: data.passwordHash, role: data.role, shopId: data.shopId, isActive: true, deletedAt: null },
+    });
+  }
+  // Also revive soft-deleted row with same email to respect active-only uniqueness
+  const deleted = await prisma.user.findFirst({ where: { email: data.email } });
+  if (deleted) {
+    return prisma.user.update({
+      where: { id: deleted.id },
+      data: { name: data.name, passwordHash: data.passwordHash, role: data.role, shopId: data.shopId, isActive: true, deletedAt: null },
+    });
+  }
+  return prisma.user.create({ data: { ...data, isActive: true } });
+}
+
 async function main() {
   console.log("[SEED] Seeding shops, counters, users...");
 
-  // Create default shop (code is the human ID GB-SHOP-1001; never clobber on reseed)
   const defaultShop = await prisma.shop.upsert({
     where: { id: "shop_default" },
-    update: { name: "Main Shop", isActive: true, deletedAt: null },
+    update: { code: "GB-SHOP-1001", name: "Main Shop", isActive: true, deletedAt: null },
     create: { id: "shop_default", code: "GB-SHOP-1001", name: "Main Shop", address: "Main Bazaar", isActive: true },
   });
-  // Backfill code for DBs seeded before the shop-code migration, then sync sequence
-  try {
-    await prisma.$executeRawUnsafe(`UPDATE "Shop" SET "code" = 'GB-SHOP-1001' WHERE "id" = 'shop_default' AND "code" IS NULL`);
-    await prisma.$executeRawUnsafe(`SELECT setval('shop_code_seq', GREATEST((SELECT COALESCE(MAX((regexp_replace("code", '^GB-SHOP-', '')::INT)), 1000) FROM "Shop") + 1, 1001), false)`);
-  } catch {
-    // sequence/table missing (migration not yet applied) — fresh migrate will handle it
-  }
   console.log(`[SEED] Shop: ${defaultShop.id} — ${defaultShop.name}`);
 
-  // Backfill legacy receipt identity once (never clobber owner edits on reseed)
   await prisma.shop.updateMany({
     where: { id: defaultShop.id, receiptName: null },
     data: { receiptName: "GB Retail", gstin: "07ABCDE1234F1Z5", upiId: "store@upi", receiptFooter: "Thank you, visit again" },
   });
 
-  // Counters
+  // Per-shop order counter for collision-free bill numbers
+  await prisma.shopOrderSeq.upsert({
+    where: { shopId: defaultShop.id },
+    update: {},
+    create: { shopId: defaultShop.id, lastNo: 0 },
+  });
+
   const counter1 = await prisma.counter.upsert({
     where: { id: "counter_1" },
     update: { shopId: defaultShop.id, name: "Counter 1", isActive: true, deletedAt: null },
@@ -69,31 +82,17 @@ async function main() {
   });
   console.log(`[SEED] Counters: ${counter1.name}, ${counter2.name}`);
 
-  // Users: SUPER_ADMIN, SHOP_OWNER, STAFF
-  const superHash = await hash("super123");
-  await prisma.user.upsert({
-    where: { email: "super@gbretail.local" },
-    update: { name: "Super Admin", passwordHash: superHash, role: "SUPER_ADMIN", shopId: null, isActive: true, deletedAt: null },
-    create: { email: "super@gbretail.local", name: "Super Admin", passwordHash: superHash, role: "SUPER_ADMIN", shopId: null, isActive: true },
-  });
-  const ownerHash = await hash("owner123");
-  await prisma.user.upsert({
-    where: { email: "owner@shop.local" },
-    update: { name: "Shop Owner", passwordHash: ownerHash, role: "SHOP_OWNER", shopId: defaultShop.id, isActive: true, deletedAt: null },
-    create: { email: "owner@shop.local", name: "Shop Owner", passwordHash: ownerHash, role: "SHOP_OWNER", shopId: defaultShop.id, isActive: true },
-  });
-  const staffHash1 = await hash("staff123");
-  await prisma.user.upsert({
-    where: { email: "staff1@shop.local" },
-    update: { name: "Staff 1", passwordHash: staffHash1, role: "STAFF", shopId: defaultShop.id, isActive: true, deletedAt: null },
-    create: { email: "staff1@shop.local", name: "Staff 1", passwordHash: staffHash1, role: "STAFF", shopId: defaultShop.id, isActive: true },
-  });
-  const staffHash2 = await hash("staff123");
-  await prisma.user.upsert({
-    where: { email: "staff2@shop.local" },
-    update: { name: "Staff 2", passwordHash: staffHash2, role: "STAFF", shopId: defaultShop.id, isActive: true, deletedAt: null },
-    create: { email: "staff2@shop.local", name: "Staff 2", passwordHash: staffHash2, role: "STAFF", shopId: defaultShop.id, isActive: true },
-  });
+  const superHash = await hash(process.env.SEED_SUPER_PASSWORD || "super123");
+  await upsertUserByEmail({ email: "super@gbretail.local", name: "Super Admin", passwordHash: superHash, role: "SUPER_ADMIN", shopId: null });
+  const ownerHash = await hash(process.env.SEED_OWNER_PASSWORD || "owner123");
+  await upsertUserByEmail({ email: "owner@shop.local", name: "Shop Owner", passwordHash: ownerHash, role: "SHOP_OWNER", shopId: defaultShop.id });
+  const staffHash1 = await hash(process.env.SEED_STAFF_PASSWORD || "staff123");
+  await upsertUserByEmail({ email: "staff1@shop.local", name: "Staff 1", passwordHash: staffHash1, role: "STAFF", shopId: defaultShop.id });
+  const staffHash2 = await hash(process.env.SEED_STAFF_PASSWORD || "staff123");
+  await upsertUserByEmail({ email: "staff2@shop.local", name: "Staff 2", passwordHash: staffHash2, role: "STAFF", shopId: defaultShop.id });
+  if (process.env.NODE_ENV === "production" && !(process.env.SEED_SUPER_PASSWORD && process.env.SEED_OWNER_PASSWORD)) {
+    console.warn("[SEED] WARNING: using default dev passwords in production — set SEED_SUPER_PASSWORD/SEED_OWNER_PASSWORD/SEED_STAFF_PASSWORD");
+  }
   console.log("[SEED] Users: super@gbretail.local / owner@shop.local / staff1@shop.local / staff2@shop.local (pw: super123 / owner123 / staff123)");
 
   console.log("[SEED] Seeding products...");
@@ -103,7 +102,6 @@ async function main() {
     const cost = sell ? Math.round(sell * 0.78 * 100) / 100 : 0;
     const unit = (p as any).unit ?? "pcs";
     const lowStockThreshold = (p as any).lowStockThreshold ?? 10;
-    // Never clobber live stock on reseed — only set stockQuantity on create.
     await prisma.product.upsert({
       where: { id: p.id },
       update: {
@@ -141,13 +139,6 @@ async function main() {
   }
 
   console.log(`[SEED] Seeded ${products.length} products for shop ${defaultShop.id}`);
-
-  // Backfill existing products without shopId (old data)
-  const orphanCount = await prisma.product.count({ where: { shopId: null, deletedAt: null } });
-  if (orphanCount > 0) {
-    await prisma.product.updateMany({ where: { shopId: null }, data: { shopId: defaultShop.id } });
-    console.log(`[SEED] Backfilled ${orphanCount} orphan products to default shop`);
-  }
 }
 
 main()

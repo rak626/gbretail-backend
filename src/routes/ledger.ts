@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { getShopScope } from "../lib/shopScope.js";
 import { prisma } from "../lib/prisma.js";
 import { addDays, endOfDay, startOfDay, computeDueDate } from "../lib/utils.js";
 import { normalizePhone, parseCreditDays, normalizeCreditTerm } from "../lib/normalize.js";
@@ -10,12 +11,6 @@ import { getIdempotencyKey, isValidIdempotencyKey, fingerprint } from "../lib/id
 const ledger = new Hono();
 
 ledger.use("*", requireAuth as any);
-
-function getShopScope(c: any) {
-  const user = (c as any).get("user") as any;
-  const shopId = ((c as any).get("shopId") as string | null) || user?.shopId || c.req.query("shopId") || null;
-  return { user, shopId };
-}
 
 // GET /api/ledger/due-today?q&includeOverdue  (must be before /:id)
 ledger.get("/due-today", async (c) => {
@@ -70,11 +65,14 @@ ledger.get("/due-today", async (c) => {
 
     return c.json({ entries, total: agg._count._all, count: agg._count._all, amount: agg._sum.amount ?? 0 });
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed", entries: [], total: 0 }, 500);
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code, entries: [], total: 0 }, 500);
   }
 });
 
 // GET /api/ledger?filter&q&customerId&page&limit&due
+// Pagination: legacy ?page (deprecated) OR ?cursor → { nextCursor }
+// (cursor mode uses createdAt desc and skips header stats for speed).
 ledger.get("/", async (c) => {
   const rawLimit = parseInt(c.req.query("limit") ?? "50", 10);
   const limit = isNaN(rawLimit) ? 50 : Math.min(rawLimit, 100);
@@ -127,6 +125,23 @@ ledger.get("/", async (c) => {
       (where as Record<string, unknown>).customerId = { in: idsFromSearch };
     }
 
+    const cursorParamEarly = c.req.query("cursor") ?? null;
+    if (cursorParamEarly) {
+      const { decodeCursor: ldc, encodeCursor: lec, cursorWhere: lcw } = await import("../lib/pagination.js");
+      const dec0 = ldc(cursorParamEarly);
+      if (!dec0) return c.json({ error: "Invalid cursor", code: "INVALID_CURSOR" }, 400);
+      const rows = await prisma.ledgerEntry.findMany({
+        where: { AND: [where, lcw(dec0)] } as any,
+        include: { customer: { select: { id: true, name: true, phone: true, balance: true } }, order: { select: { id: true, orderNumber: true, total: true } }, shop: { select: { id: true, name: true } }, counter: { select: { id: true, name: true } } },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        take: limit + 1,
+      });
+      const hasMore = rows.length > limit;
+      const page0 = hasMore ? rows.slice(0, limit) : rows;
+      const last: any = page0[page0.length - 1];
+      return c.json({ entries: page0, nextCursor: hasMore && last ? lec(last.createdAt, last.id) : null, limit });
+    }
+
     const [entries, total] = await Promise.all([
       prisma.ledgerEntry.findMany({
         where: where as any,
@@ -159,7 +174,8 @@ ledger.get("/", async (c) => {
       },
     });
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed to fetch ledger", entries: [], total: 0 }, 500);
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code, entries: [], total: 0 }, 500);
   }
 });
 
@@ -171,16 +187,27 @@ ledger.post("/", async (c) => {
   try {
     const body = await c.req.json();
     const user = (c as any).get("user") as any;
-    let shopId: string | null = ((c as any).get("shopId") as string | null) || user?.shopId || c.req.query("shopId") || null;
-    // Only SUPER_ADMIN may target another shop via body.shopId — OWNER/STAFF are pinned to their own shop.
-    if (body.shopId && user.role === "SUPER_ADMIN") shopId = String(body.shopId);
+    const { shopId: ctxShop } = getShopScope(c);
+    let shopId: string | null = ctxShop ?? user?.shopId ?? null;
+    // Only SUPER_ADMIN may target another shop via body.shopId — OWNER/STAFF pinned.
+    if (user.role === "SUPER_ADMIN" && (body as any).shopId) shopId = String((body as any).shopId);
     if (!shopId && user.role !== "SUPER_ADMIN") return c.json({ error: "Shop not assigned" }, 403);
     if (user.role === "SUPER_ADMIN" && !shopId) return c.json({ error: "shopId required" }, 400);
     if (shopId) {
       const shop = await prisma.shop.findUnique({ where: { id: shopId } });
       if (!shop || (shop as any).deletedAt) return c.json({ error: "Shop not found" }, 404);
     }
-    let counterId: string | null = body.counterId ? String(body.counterId) : user?.counterId || null;
+    // Counter: STAFF always re-resolved fresh (never trust JWT/body — prevents stale/forged attribution).
+    // OWNER/SUPER: explicit body.counterId validated, else first active counter.
+    let counterId: string | null = null;
+    if (user.role === "STAFF") {
+      const { resolveStaffCounter } = await import("../lib/staffCounter.js");
+      const sc = await resolveStaffCounter(user.userId, shopId!);
+      if (!sc) return c.json({ error: "No counter assigned — contact owner" }, 403);
+      counterId = sc.id;
+    } else {
+      counterId = (body as any).counterId ? String((body as any).counterId) : null;
+    }
     // validate counter belongs to shop if provided
     if (counterId) {
       const counter = await prisma.counter.findUnique({ where: { id: counterId } });
@@ -369,7 +396,8 @@ ledger.get("/:id", async (c) => {
     if (shopId && (entry as any).shopId && (entry as any).shopId !== shopId && user.role !== "SUPER_ADMIN") return c.json({ error: "Forbidden" }, 403);
     return c.json({ entry });
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code }, 500);
   }
 });
 
@@ -448,7 +476,8 @@ ledger.patch("/:id", async (c) => {
 
     return c.json({ error: "Unknown action. Use settle or reopen" }, 400);
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed to update" }, 500);
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code }, 500);
   }
 });
 
@@ -498,7 +527,8 @@ ledger.post("/:id/restore", async (c) => {
     const restored = await prisma.ledgerEntry.findUnique({ where: { id }, include: { customer: { select: { id: true, name: true, phone: true, balance: true } } } });
     return c.json({ entry: restored });
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code }, 500);
   }
 });
 

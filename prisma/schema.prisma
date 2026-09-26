@@ -6,6 +6,44 @@ datasource db {
   provider = "postgresql"
 }
 
+enum Role {
+  SUPER_ADMIN
+  SHOP_OWNER
+  STAFF
+}
+
+enum PaymentMethod {
+  cash
+  upi
+  khata
+  split
+}
+
+enum OrderStatus {
+  pending
+  confirmed
+  packed
+  out_for_delivery
+  delivered
+  cancelled
+  completed
+}
+
+enum OrderChannel {
+  pos
+  online
+}
+
+enum Fulfilment {
+  pickup
+  delivery
+}
+
+enum LedgerStatus {
+  pending
+  settled
+}
+
 model Shop {
   id        String    @id @default(cuid())
   // Human shop ID, auto-assigned GB-SHOP-1001, 1002… — shown in header/admin.
@@ -13,6 +51,17 @@ model Shop {
   code      String    @unique
   name      String
   address   String?
+  // City for online storefront discovery (customer picks store in same city).
+  city           String?
+  // Online storefront config (SUPER_ADMIN configurable).
+  isOnlineEnabled  Boolean @default(false)
+  pickupEnabled    Boolean @default(true)
+  deliveryEnabled  Boolean @default(true)
+  codEnabled       Boolean @default(true)
+  deliveryFee      Decimal @default(0) @db.Decimal(12, 2)
+  freeDeliveryAbove Decimal? @db.Decimal(12, 2)
+  minOrderAmount   Decimal @default(0) @db.Decimal(12, 2)
+  onlineNote       String?
   isActive  Boolean   @default(true)
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -23,21 +72,23 @@ model Shop {
   upiId         String?
   phone         String?
   receiptFooter String?
-  counters  Counter[]
-  users     User[]
-  products  Product[]
-  orders    Order[]
+  counters      Counter[]
+  users         User[]
+  products      Product[]
+  orders        Order[]
   ledgerEntries LedgerEntry[]
-  customers Customer[]
+  customers     Customer[]
 
   @@index([name])
   @@index([deletedAt])
+  @@index([city])
+  @@index([isOnlineEnabled])
 }
 
 model Counter {
   id        String    @id @default(cuid())
   shopId    String
-  shop      Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  shop      Shop      @relation(fields: [shopId], references: [id], onDelete: Restrict)
   name      String
   isActive  Boolean   @default(true)
   createdAt DateTime  @default(now())
@@ -47,19 +98,23 @@ model Counter {
   ledgerEntries LedgerEntry[]
   users     User[]
 
-  @@unique([shopId, name])
+  // Active-only uniqueness enforced by partial index in migration:
+  // CREATE UNIQUE INDEX ... ON "Counter"("shopId","name") WHERE "deletedAt" IS NULL
   @@index([shopId])
+  @@index([shopId, name])
   @@index([deletedAt])
 }
 
 model User {
   id           String    @id @default(cuid())
   shopId       String?
-  shop         Shop?     @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  email        String    @unique
+  shop         Shop?     @relation(fields: [shopId], references: [id], onDelete: Restrict)
+  // Active-only uniqueness enforced by partial index in migration:
+  // CREATE UNIQUE INDEX ... ON "User"("email") WHERE "deletedAt" IS NULL
+  email        String
   passwordHash String
   name         String
-  role         String    // SUPER_ADMIN | SHOP_OWNER | STAFF
+  role         Role      @default(STAFF)
   // Owner-granted permission: STAFF with this flag can open + edit inventory.
   // SHOP_OWNER always has full access; SUPER_ADMIN never touches shop inventory.
   canManageInventory Boolean @default(false)
@@ -78,8 +133,10 @@ model User {
   ledgerEntries LedgerEntry[]
   sessions     Session[]
 
+  @@index([email])
   @@index([shopId])
   @@index([role])
+  @@index([counterId])
   @@index([deletedAt])
 }
 
@@ -99,12 +156,14 @@ model Session {
   @@index([userId])
   @@index([expiresAt])
   @@index([userId, revokedAt])
+  @@index([replacedBy])
+  @@index([revokedAt])
 }
 
 model Product {
   id             String      @id @default(cuid())
-  shopId         String?
-  shop           Shop?       @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  shopId         String
+  shop           Shop        @relation(fields: [shopId], references: [id], onDelete: Restrict)
   name           String
   is_loose       Boolean     @default(false)
   rate_per_kg    Decimal?    @db.Decimal(12, 2)
@@ -113,19 +172,26 @@ model Product {
   costPrice      Decimal     @default(0) @db.Decimal(12, 2)
   unit           String      @default("pcs")
   category       String
-  preset_weights Float[]     @default([])
+  preset_weights Decimal[]   @default([]) @db.Decimal(12, 3)
   preset_prices  Decimal[]   @default([]) @db.Decimal(12, 2)
-  stockQuantity  Float       @default(0)
-  lowStockThreshold Float    @default(10)
+  stockQuantity  Decimal     @default(0) @db.Decimal(12, 3)
+  lowStockThreshold Decimal  @default(10) @db.Decimal(12, 3)
+  // Online storefront curation — same product line, online-specific price/visibility.
+  isOnline    Boolean  @default(false)
+  onlinePrice Decimal? @db.Decimal(12, 2)
+  imageUrl    String?
   deletedAt      DateTime?
   createdAt      DateTime    @default(now())
   updatedAt      DateTime    @updatedAt
   orderItems     OrderItem[]
 
-  @@index([shopId, barcode])
+  // Active-only barcode uniqueness enforced by partial index in migration:
+  // CREATE UNIQUE INDEX ... ON "Product"("shopId","barcode") WHERE "deletedAt" IS NULL AND "barcode" IS NOT NULL
   @@index([shopId])
+  @@index([shopId, barcode])
   @@index([shopId, category])
   @@index([shopId, name])
+  @@index([shopId, isOnline])
   @@index([category])
   @@index([name])
   @@index([deletedAt])
@@ -134,10 +200,13 @@ model Product {
 model Customer {
   id            String        @id @default(cuid())
   shopId        String
-  shop          Shop          @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  shop          Shop          @relation(fields: [shopId], references: [id], onDelete: Restrict)
   name          String
   phone         String?
   email         String?
+  // Online customer auth — same row as POS customer (linked by phone/email per shop).
+  // NULL = POS-only customer; set on online register. POS shows online customers automatically.
+  passwordHash  String?
   address       String?
   notes         String?
   creditLimit   Decimal?      @db.Decimal(12, 2)
@@ -153,23 +222,19 @@ model Customer {
   ledgerEntries LedgerEntry[]
 
   @@index([shopId, phone])
-  @@index([shopId])
   @@index([shopId, deletedAt])
   @@index([shopId, balance])
+  @@index([shopId, createdAt])
+  @@index([shopId, email])
   @@index([name])
-  @@index([phone])
   @@index([deletedAt])
-  @@index([lastOrderAt])
-  @@index([firstOrderAt])
-  @@index([balance])
-  @@index([totalSpent])
 }
 
 model Order {
   id            String        @id @default(cuid())
   orderNumber   String        @unique
-  shopId        String?
-  shop          Shop?         @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  shopId        String
+  shop          Shop          @relation(fields: [shopId], references: [id], onDelete: Restrict)
   counterId     String?
   counter       Counter?      @relation(fields: [counterId], references: [id], onDelete: SetNull)
   userId        String?
@@ -177,14 +242,21 @@ model Order {
   items         OrderItem[]
   total         Decimal       @db.Decimal(12, 2)
   discount      Decimal       @default(0) @db.Decimal(12, 2)
-  paymentMethod String        // "cash" | "upi" | "khata" | "split"
+  paymentMethod PaymentMethod
   // Split-tender breakdown (split rows only; NULL for cash/upi/khata).
-  // cashAmount + upiAmount == total, enforced server-side.
+  // cashAmount + upiAmount == total, enforced by CHECK constraint.
   cashAmount    Decimal?      @db.Decimal(12, 2)
   upiAmount     Decimal?      @db.Decimal(12, 2)
   customerId    String?
-  customer      Customer?     @relation(fields: [customerId], references: [id])
-  status        String        @default("completed")
+  customer      Customer?     @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  status        OrderStatus   @default(completed)
+  // Channel: pos = local shop machine frontend, online = customer storefront.
+  // POS bills stay completed; online orders flow pending→confirmed→packed→delivered.
+  channel       OrderChannel  @default(pos)
+  fulfilment    Fulfilment?
+  deliveryAddress String?
+  deliveryPhone   String?
+  notes           String?
   orderDate     DateTime      @default(now())
   syncedAt      DateTime?
   deletedAt     DateTime?
@@ -192,7 +264,7 @@ model Order {
   updatedAt     DateTime      @updatedAt
   ledgerEntries LedgerEntry[]
   // Client-generated idempotency key (Idempotency-Key header): replays return the
-  // original order instead of double-billing. Unique per shop; NULL = legacy rows.
+  // original order instead of double-billing. Partial-unique per shop where NOT NULL.
   idempotencyKey         String?
   idempotencyFingerprint String?
 
@@ -200,13 +272,14 @@ model Order {
   @@index([shopId, createdAt])
   @@index([shopId, counterId])
   @@index([shopId, userId])
+  @@index([shopId, status])
+  @@index([shopId, channel])
+  @@index([shopId, channel, status])
+  @@index([shopId, customerId, createdAt])
   @@index([customerId])
   @@index([createdAt])
   @@index([paymentMethod])
-  @@index([orderNumber])
   @@index([deletedAt])
-  @@unique([shopId, idempotencyKey])
-  @@index([idempotencyKey])
 }
 
 model OrderItem {
@@ -214,16 +287,19 @@ model OrderItem {
   orderId   String
   order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
   productId String?
-  product   Product? @relation(fields: [productId], references: [id])
+  product   Product? @relation(fields: [productId], references: [id], onDelete: Restrict)
   name      String
   price     Decimal   @db.Decimal(12, 2)
   unit      String
-  quantity  Float?
-  weight    Float?
+  quantity  Decimal?  @db.Decimal(12, 3)
+  weight    Decimal?  @db.Decimal(12, 3)
   lineTotal Decimal   @db.Decimal(12, 2)
   isCustom  Boolean  @default(false)
   costPrice Decimal? @db.Decimal(12, 2)
   category  String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  deletedAt DateTime?
 
   @@index([orderId])
   @@index([productId])
@@ -232,27 +308,26 @@ model OrderItem {
 
 model LedgerEntry {
   id         String    @id @default(cuid())
-  shopId     String?
-  shop       Shop?     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  shopId     String
+  shop       Shop      @relation(fields: [shopId], references: [id], onDelete: Restrict)
   counterId  String?
   counter    Counter?  @relation(fields: [counterId], references: [id], onDelete: SetNull)
   userId     String?
   user       User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
   customerId String
-  customer   Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  customer   Customer  @relation(fields: [customerId], references: [id], onDelete: Restrict)
   orderId    String?
   order      Order?    @relation(fields: [orderId], references: [id], onDelete: SetNull)
   amount     Decimal   @db.Decimal(12, 2)
   creditDays Int       @default(30)
   dueDate    DateTime
-  status     String    @default("pending") // pending | settled | overdue (computed)
+  status     LedgerStatus @default(pending)
   note       String?
   settledAt  DateTime?
   deletedAt  DateTime?
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
-  // Client-generated idempotency key (Idempotency-Key header): replays return the
-  // original entry instead of double-posting dues. Unique per shop; NULL = legacy rows.
+  // Client-generated idempotency key: partial-unique per shop where NOT NULL.
   idempotencyKey         String?
   idempotencyFingerprint String?
 
@@ -260,6 +335,7 @@ model LedgerEntry {
   @@index([shopId, status])
   @@index([shopId, customerId])
   @@index([shopId, dueDate])
+  @@index([shopId, status, dueDate])
   @@index([customerId])
   @@index([status])
   @@index([dueDate])
@@ -267,6 +343,12 @@ model LedgerEntry {
   @@index([settledAt])
   @@index([orderId])
   @@index([deletedAt])
-  @@unique([shopId, idempotencyKey])
-  @@index([idempotencyKey])
+}
+
+model ShopOrderSeq {
+  // Per-shop bill counter for collision-free order numbers.
+  // One row per shop; incremented with SELECT ... FOR UPDATE inside order tx.
+  shopId    String   @id
+  lastNo    Int      @default(0)
+  updatedAt DateTime @updatedAt
 }

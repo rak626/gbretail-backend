@@ -46,20 +46,26 @@ shops.get("/", async (c) => {
   const user = (c as any).get("user" as any) as any;
   try {
     if (user.role === "SUPER_ADMIN") {
-      const items = await prisma.shop.findMany({ where: { deletedAt: null }, orderBy: { createdAt: "desc" } });
-      // Per-shop console meta (super only): owner, staff/product counts, last bill.
-      // Additive fields — list shape stays { shops: [...] }.
-      const enriched = await Promise.all(
-        (items as any[]).map(async (s) => {
-          const [owner, staffCount, productCount, lastOrder] = await Promise.all([
-            prisma.user.findFirst({ where: { shopId: s.id, role: "SHOP_OWNER", deletedAt: null }, select: { id: true, name: true, email: true, isActive: true } }),
-            prisma.user.count({ where: { shopId: s.id, role: "STAFF", deletedAt: null } }),
-            prisma.product.count({ where: { shopId: s.id, deletedAt: null } as any }),
-            prisma.order.findFirst({ where: { shopId: s.id, deletedAt: null } as any, orderBy: { createdAt: "desc" }, select: { createdAt: true } as any }),
-          ]);
-          return { ...s, owner: owner ?? null, staffCount, productCount, lastOrderAt: (lastOrder as any)?.createdAt ?? null };
-        })
-      );
+      const items = await prisma.shop.findMany({ where: { deletedAt: null }, orderBy: { createdAt: "desc" }, take: 100 });
+      // Batched meta: 4 grouped queries total (not 4×N). Capped at 100 shops.
+      const shopIds = items.map((s) => s.id);
+      const [owners, staffCounts, productCounts, lastOrders] = await Promise.all([
+        prisma.user.findMany({ where: { shopId: { in: shopIds }, role: "SHOP_OWNER", deletedAt: null }, select: { id: true, name: true, email: true, isActive: true, shopId: true } }),
+        prisma.user.groupBy({ by: ["shopId"], where: { shopId: { in: shopIds }, role: "STAFF", deletedAt: null }, _count: { _all: true } }),
+        prisma.product.groupBy({ by: ["shopId"], where: { shopId: { in: shopIds }, deletedAt: null }, _count: { _all: true } }),
+        prisma.order.groupBy({ by: ["shopId"], where: { shopId: { in: shopIds }, deletedAt: null }, _max: { createdAt: true } }),
+      ]);
+      const ownerByShop = new Map(owners.map((o: any) => [o.shopId, o]));
+      const staffByShop = new Map(staffCounts.map((r: any) => [r.shopId, r._count._all]));
+      const prodByShop = new Map(productCounts.map((r: any) => [r.shopId, r._count._all]));
+      const lastByShop = new Map(lastOrders.map((r: any) => [r.shopId, r._max.createdAt]));
+      const enriched = (items as any[]).map((s) => ({
+        ...s,
+        owner: ownerByShop.get(s.id) ?? null,
+        staffCount: staffByShop.get(s.id) ?? 0,
+        productCount: prodByShop.get(s.id) ?? 0,
+        lastOrderAt: lastByShop.get(s.id) ?? null,
+      }));
       return c.json({ shops: enriched });
     }
     // Shop owner/staff: return own shop
@@ -102,6 +108,7 @@ shops.post("/", requireRole("SUPER_ADMIN") as any, async (c) => {
     const receipt = receiptFields(body);
     if (typeof receipt === "string") return c.json({ error: receipt }, 400);
     const shop = await prisma.shop.create({ data: { name, address, code: await allocateShopCode(), ...receipt } });
+    await prisma.shopOrderSeq.upsert({ where: { shopId: shop.id }, update: {}, create: { shopId: shop.id, lastNo: 0 } });
     return c.json({ shop }, 201);
   } catch (e) {
     const { toAppError: toAppErr } = await import("../lib/errors.js");

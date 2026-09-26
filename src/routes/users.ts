@@ -62,7 +62,7 @@ users.post("/", requireRole("SUPER_ADMIN", "SHOP_OWNER") as any, async (c) => {
 
     if (!email || !password || !name) return c.json({ error: "email, password, name required" }, 400);
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return c.json({ error: "Invalid email" }, 400);
-    if (password.length < 6) return c.json({ error: "Password must be >=6 chars" }, 400);
+    if (password.length < 8) return c.json({ error: "Password must be >=8 chars" }, 400);
     if (name.length > 80) return c.json({ error: "Name too long" }, 400);
 
     const allowedRoles = actor.role === "SUPER_ADMIN" ? ["SUPER_ADMIN", "SHOP_OWNER", "STAFF"] : ["STAFF"];
@@ -79,9 +79,10 @@ users.post("/", requireRole("SUPER_ADMIN", "SHOP_OWNER") as any, async (c) => {
       shopId = null; // super admin has no shop
     }
 
-    const existing = await prisma.user.findUnique({ where: { email } });
-    if (existing && !(existing as any).deletedAt) return c.json({ error: "Email already exists" }, 409);
-    if (existing && (existing as any).deletedAt) return c.json({ error: "Email belongs to deleted user — restore or use different email" }, 409);
+    const existing = await prisma.user.findFirst({ where: { email, deletedAt: null } });
+    if (existing) return c.json({ error: "Email already exists" }, 409);
+    const deletedDup = await prisma.user.findFirst({ where: { email } });
+    if (deletedDup) return c.json({ error: "Email belongs to deleted user — restore or use different email" }, 409);
 
     const passwordHash = await hashPassword(password);
     // Owner-only counter assignment at creation (STAFF of own shop).
@@ -98,7 +99,7 @@ users.post("/", requireRole("SUPER_ADMIN", "SHOP_OWNER") as any, async (c) => {
         email,
         passwordHash,
         name,
-        role,
+        role: role as any,
         shopId,
         // Owner/super can grant inventory access at creation (STAFF only; owner always has it).
         // SUPER_ADMIN cannot grant — only the shop owner can.
@@ -141,13 +142,13 @@ users.patch("/:id", async (c) => {
       if (actor.role === "STAFF" && !isSelf) return c.json({ error: "Forbidden" }, 403);
       const e = String(body.email).trim().toLowerCase();
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) return c.json({ error: "Invalid email" }, 400);
-      const dup = await prisma.user.findUnique({ where: { email: e } });
+      const dup = await prisma.user.findFirst({ where: { email: e, deletedAt: null } });
       if (dup && dup.id !== id) return c.json({ error: "Email already exists" }, 409);
       data.email = e;
     }
     if (body.password !== undefined) {
       const p = String(body.password);
-      if (p.length < 6) return c.json({ error: "Password >=6" }, 400);
+      if (p.length < 8) return c.json({ error: "Password must be >=8 chars" }, 400);
       data.passwordHash = await hashPassword(p);
       // Password change revokes all existing sessions instantly.
       data.tokenVersion = { increment: 1 };
@@ -226,7 +227,7 @@ users.patch("/:id", async (c) => {
   }
 });
 
-// DELETE /api/users/:id — soft delete
+// DELETE /api/users/:id — soft delete + instant session revocation (atomic)
 users.delete("/:id", requireRole("SUPER_ADMIN", "SHOP_OWNER") as any, async (c) => {
   const actor = (c as any).get("user" as any) as any;
   const id = c.req.param("id");
@@ -235,8 +236,11 @@ users.delete("/:id", requireRole("SUPER_ADMIN", "SHOP_OWNER") as any, async (c) 
     if (!target || (target as any).deletedAt) return c.json({ error: "Not found or already deleted" }, 404);
     if (actor.role === "SHOP_OWNER" && (target as any).shopId !== actor.shopId) return c.json({ error: "Forbidden" }, 403);
     if (target.id === actor.userId) return c.json({ error: "Cannot delete self" }, 400);
-    const updated = await prisma.user.update({ where: { id }, data: { deletedAt: new Date(), isActive: false } });
-    return c.json({ user: { id: updated.id }, softDeleted: true });
+    await prisma.$transaction(async (tx) => {
+      await tx.user.update({ where: { id }, data: { deletedAt: new Date(), isActive: false, tokenVersion: { increment: 1 } } });
+      await tx.session.updateMany({ where: { userId: id, revokedAt: null }, data: { revokedAt: new Date() } });
+    });
+    return c.json({ user: { id }, softDeleted: true });
   } catch (e) {
     const { toAppError } = await import("../lib/errors.js");
     const appErr = toAppError(e);

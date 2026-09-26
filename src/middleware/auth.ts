@@ -49,15 +49,16 @@ export async function requireAuth(c: Context, next: Next) {
       return c.json({ error: "Session revoked — login again", code: "SESSION_REVOKED" }, 401);
     }
     // Per-device logout: if the token carries a jti revoked via /logout, reject it.
-    // Missing table (rollout) or missing row (legacy/pruned) → allow; refresh still enforces.
+    // Fail closed: DB errors → 503 (never allow a possibly-revoked token through).
     if ((payload as any).jti) {
+      let sess: unknown = null;
       try {
-        const sess = await prisma.session.findUnique({ where: { jti: (payload as any).jti } });
-        if (sess && (sess as any).revokedAt) {
-          return c.json({ error: "Session revoked — login again", code: "SESSION_REVOKED" }, 401);
-        }
+        sess = await prisma.session.findUnique({ where: { jti: (payload as any).jti } });
       } catch {
-        // ignore — fail open to legacy behavior
+        return c.json({ error: "Database unavailable — try again", code: "DB_NOT_CONFIGURED" }, 503);
+      }
+      if (sess && (sess as any).revokedAt) {
+        return c.json({ error: "Session revoked — login again", code: "SESSION_REVOKED" }, 401);
       }
     }
     if ((row as any).role !== "SUPER_ADMIN" && (row as any).shopId) {

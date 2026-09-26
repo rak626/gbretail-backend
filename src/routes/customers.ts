@@ -1,8 +1,9 @@
 import { Hono } from "hono";
+import { getShopScope } from "../lib/shopScope.js";
 import { prisma } from "../lib/prisma.js";
 import { normalizePhone, normalizeEmail } from "../lib/normalize.js";
 import { toAppError } from "../lib/errors.js";
-import { startOfDay } from "../lib/utils.js";
+import { startOfDay, addDays } from "../lib/utils.js";
 import { requireAuth } from "../middleware/auth.js";
 import { parseMoney, dec, MAX_MONEY } from "../lib/money.js";
 
@@ -11,16 +12,11 @@ const customers = new Hono();
 customers.use("*", requireAuth as any);
 
 // Shop scope: OWNER/STAFF forced to own shop; SUPER_ADMIN may filter by ?shopId / body.shopId or see all.
-function getShopScope(c: any) {
-  const user = (c as any).get("user") as any;
-  const shopId =
-    ((c as any).get("shopId") as string | null) || user?.shopId || c.req.query("shopId") || null;
-  return { user, shopId: shopId ? String(shopId) : null };
-}
-
 // GET /api/customers?q&limit&page&sortBy&sortOrder&hasBalance&includeDeleted&due
 // hasBalance: "with" | "without" | ""  (balance >0 vs =0)
 // includeDeleted: "1" to show soft-deleted
+// Pagination: legacy ?page (deprecated) OR ?cursor → { nextCursor } (cursor mode
+// uses createdAt desc and skips header stats for speed).
 customers.get("/", async (c) => {
   const q = (c.req.query("q") ?? "").trim();
   const qLower = q.toLowerCase();
@@ -60,9 +56,7 @@ customers.get("/", async (c) => {
     if (activeRaw) {
       const days = parseInt(String(activeRaw), 10);
       if (!isNaN(days) && days > 0 && days <= 365) {
-        const since = new Date();
-        since.setHours(0, 0, 0, 0);
-        since.setDate(since.getDate() - days);
+        const since = addDays(startOfDay(new Date()), -days);
         (where as any).lastOrderAt = { gte: since };
         // also need deletedAt null already
       }
@@ -70,6 +64,22 @@ customers.get("/", async (c) => {
 
     const orderBy: Record<string, unknown> = { [sortBy]: sortOrder };
     // secondary sort for stability
+    const cursorParamEarly = c.req.query("cursor") ?? null;
+    if (cursorParamEarly) {
+      const { decodeCursor: dc0, encodeCursor: ec0, cursorWhere: cw0 } = await import("../lib/pagination.js");
+      const decoded0 = dc0(cursorParamEarly);
+      if (!decoded0) return c.json({ error: "Invalid cursor", code: "INVALID_CURSOR" }, 400);
+      const rows0 = await prisma.customer.findMany({
+        where: { AND: [where, cw0(decoded0)] } as any,
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        take: limit + 1,
+      });
+      const hasMore0 = rows0.length > limit;
+      const page0 = hasMore0 ? rows0.slice(0, limit) : rows0;
+      const last0: any = page0[page0.length - 1];
+      return c.json({ customers: page0, nextCursor: hasMore0 && last0 ? ec0(last0.createdAt, last0.id) : null, limit });
+    }
+
     const [items, total] = await Promise.all([
       prisma.customer.findMany({
         where,
@@ -84,11 +94,12 @@ customers.get("/", async (c) => {
     const now = new Date();
     const thirtyAgo = new Date(now);
     thirtyAgo.setDate(thirtyAgo.getDate() - 30);
-    const [totalActive, withDuesAgg, withoutDuesCount, topSpender] = await Promise.all([
+    const [totalActive, withDuesAgg, withoutDuesCount, topSpender, totalNonDeleted] = await Promise.all([
       includeDeleted ? Promise.resolve(total) : prisma.customer.count({ where: { ...shopFilter, deletedAt: null, lastOrderAt: { gte: thirtyAgo } } }),
       prisma.customer.aggregate({ where: { ...shopFilter, deletedAt: null, balance: { gt: 0 } }, _count: { _all: true }, _sum: { balance: true } }),
       prisma.customer.count({ where: { ...shopFilter, deletedAt: null, balance: 0 } }),
       prisma.customer.findFirst({ where: { ...shopFilter, deletedAt: null }, orderBy: { totalSpent: "desc" }, select: { id: true, name: true, totalSpent: true } }),
+      includeDeleted ? prisma.customer.count({ where: { ...shopFilter, deletedAt: null } }) : Promise.resolve(total),
     ]);
 
     return c.json({
@@ -97,7 +108,7 @@ customers.get("/", async (c) => {
       page,
       limit,
       stats: {
-        totalCustomers: includeDeleted ? total : await prisma.customer.count({ where: { ...shopFilter, deletedAt: null } }),
+        totalCustomers: totalNonDeleted,
         active30d: totalActive,
         withDues: { count: withDuesAgg._count._all, amount: withDuesAgg._sum.balance ?? 0 },
         withoutDues: withoutDuesCount,
@@ -183,8 +194,8 @@ customers.get("/:id", async (c) => {
       _count: { _all: true },
       _sum: { amount: true },
     });
-    // overdue: pending where dueDate < today start
-    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+    // overdue: pending where dueDate < today start (IST)
+    const todayStart = startOfDay(new Date());
     const overdueAgg = await prisma.ledgerEntry.aggregate({
       where: { customerId: id, status: "pending", dueDate: { lt: todayStart } },
       _count: { _all: true },

@@ -35,7 +35,18 @@ export function createApp() {
   // Global middleware — logger only in non-production to avoid verbose PII
   if (!config.isProduction) app.use("*", logger());
 
-  app.use("*", secureHeaders());
+  app.use("*", secureHeaders({
+    contentSecurityPolicy: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", "data:"],
+      connectSrc: ["'self'"],
+      frameAncestors: ["'none'"],
+    },
+    strictTransportSecurity: "max-age=31536000; includeSubDomains",
+    xFrameOptions: "DENY",
+  }));
   // 1MB JSON cap — POS bills are KBs; fail closed with 413 instead of OOM.
   app.use(
     "*",
@@ -47,15 +58,29 @@ export function createApp() {
 
   // Lightweight auth rate-limit: 30 req/min per IP per auth endpoint.
   // Per-isolate memory on Workers (documented) — real DDoS protection lives at Cloudflare/WAF.
+  // Bounded Map (5k keys) with lazy expiry sweep so spoofed x-forwarded-for can't OOM the isolate.
   const authHits = new Map<string, { count: number; reset: number }>();
   const AUTH_WINDOW_MS = 60_000;
   const AUTH_MAX = 30;
+  const AUTH_MAX_KEYS = 5_000;
+  let lastSweep = 0;
   app.use("/api/auth/*", async (c, next) => {
     // Only throttle credential-bearing writes; verify/me stay unthrottled for header polling.
     if (c.req.method !== "POST") return next();
     const ip = c.req.header("x-forwarded-for")?.split(",")[0]?.trim() || c.req.header("cf-connecting-ip") || "local";
     const key = `${ip}:${c.req.path}`;
     const now = Date.now();
+    // Opportunistic sweep at most once per window
+    if (now - lastSweep > AUTH_WINDOW_MS) {
+      lastSweep = now;
+      for (const [k, v] of authHits) if (now > v.reset) authHits.delete(k);
+      // Hard cap: drop oldest if still over (Map preserves insertion order)
+      while (authHits.size > AUTH_MAX_KEYS) {
+        const oldest = authHits.keys().next().value;
+        if (!oldest) break;
+        authHits.delete(oldest);
+      }
+    }
     const rec = authHits.get(key);
     if (!rec || now > rec.reset) {
       authHits.set(key, { count: 1, reset: now + AUTH_WINDOW_MS });

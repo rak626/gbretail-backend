@@ -5,7 +5,7 @@ import { neonConfig } from "@neondatabase/serverless";
 import { config } from "../config.js";
 
 // API contract speaks plain numbers (frontend expects number, formats with toFixed(2)).
-// DB stays exact NUMERIC(12,2); only the JSON boundary converts Decimal -> number.
+// DB stays exact NUMERIC; only the JSON boundary converts Decimal -> number.
 // Guard against double-patching in dev reloads.
 try {
   const proto = Prisma.Decimal.prototype as unknown as { toJSON?: () => number };
@@ -19,14 +19,23 @@ try {
   // Prisma internals unavailable (edge stub) — JSON serialization falls back to default.
 }
 
+// Pool tuning: Neon free tier caps connections; Workers isolates fan out.
+// Keep per-process pool small with fast failures instead of hanging.
+const POOL_MAX = 10;
+const POOL_IDLE_TIMEOUT_MS = 30_000;
+const POOL_CONNECT_TIMEOUT_MS = 10_000;
+// pg statement_timeout in ms — kills runaway analytics queries, surfaces as 500 not hang.
+const PG_STATEMENT_TIMEOUT_MS = 15_000;
+
 // Edge-aware Prisma singleton
-// - Local Node (default): PrismaPg + pg TCP
+// - Local Node (default): PrismaPg + pg TCP with bounded pool
 // - Edge CF Workers / Vercel Edge with Neon: PrismaNeon (fetch/websocket)
 // - Prisma Accelerate: prisma:// URL (no adapter)
 
 type GlobalForPrisma = {
   prisma?: PrismaClient;
   prismaUrl?: string;
+  prismaCreating?: Promise<PrismaClient> | null;
 };
 
 const globalForPrisma = globalThis as unknown as GlobalForPrisma;
@@ -64,8 +73,9 @@ function createPrismaClient(): PrismaClient {
     });
   }
 
-  // Neon HTTP for edge (fetch) — auto if USE_NEON=1 or URL contains neon.tech (case-insensitive)
-  const useNeon = config.useNeon || connectionString.toLowerCase().includes("neon.tech");
+  // Neon HTTP for edge only: explicit USE_NEON=1, or neon.tech URL *in a Worker*.
+  // In Node, pg TCP works against Neon pooled URLs — don't force HTTP/fetch there.
+  const useNeon = config.useNeon || (config.isWorker && connectionString.toLowerCase().includes("neon.tech"));
   if (useNeon) {
     const wsCtor = getWebSocketCtor();
     if (wsCtor) {
@@ -82,8 +92,17 @@ function createPrismaClient(): PrismaClient {
     });
   }
 
-  // Default: Node pg
-  const adapter = new PrismaPg({ connectionString });
+  // Default: Node pg with bounded pool + timeouts
+  const adapter = new PrismaPg(
+    {
+      connectionString,
+      max: POOL_MAX,
+      idleTimeoutMillis: POOL_IDLE_TIMEOUT_MS,
+      connectionTimeoutMillis: POOL_CONNECT_TIMEOUT_MS,
+      // pg maps unknown keys to server GUCs on connect; statement_timeout is honored.
+      statement_timeout: PG_STATEMENT_TIMEOUT_MS,
+    } as never,
+  );
   return new PrismaClient({
     adapter,
     log: config.nodeEnv === "development" ? ["error", "warn"] : ["error"],
@@ -93,17 +112,32 @@ function createPrismaClient(): PrismaClient {
 function getPrisma(): PrismaClient {
   const url = config.databaseUrl ?? "";
   // Recreate when DATABASE_URL changes (Workers per-request env via applyEnv).
+  // Disconnect the stale client fire-and-forget so pools don't leak per isolate.
   if (!globalForPrisma.prisma || globalForPrisma.prismaUrl !== url) {
+    const stale = globalForPrisma.prisma;
+    if (stale) {
+      void stale.$disconnect().catch(() => undefined);
+    }
     globalForPrisma.prisma = createPrismaClient();
     globalForPrisma.prismaUrl = url;
   }
   return globalForPrisma.prisma;
 }
 
+export async function disconnectPrisma(): Promise<void> {
+  const client = globalForPrisma.prisma;
+  globalForPrisma.prisma = undefined;
+  globalForPrisma.prismaUrl = undefined;
+  if (client) {
+    await client.$disconnect().catch(() => undefined);
+  }
+}
+
 // Lazy proxy so Workers bindings applied per-request (applyEnv) are honored,
 // and missing DATABASE_URL fails at query time (503) instead of import time.
 export const prisma: PrismaClient = new Proxy({} as PrismaClient, {
   get(_target, prop, receiver) {
+    if (prop === "$disconnect") return () => disconnectPrisma();
     const client = getPrisma();
     const value = Reflect.get(client as unknown as Record<PropertyKey, unknown>, prop, receiver);
     return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(client) : value;

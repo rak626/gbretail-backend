@@ -48,7 +48,7 @@ auth.post("/login", async (c) => {
 
     if (!email || !password) return c.json({ error: "Email and password required" }, 400);
 
-    const user = await prisma.user.findUnique({ where: { email }, include: { shop: { select: { id: true, code: true, name: true, address: true, receiptName: true, gstin: true, upiId: true, phone: true, receiptFooter: true, isActive: true, deletedAt: true } }, counter: { select: { id: true, name: true } } } });
+    const user = await prisma.user.findFirst({ where: { email, deletedAt: null }, include: { shop: { select: { id: true, code: true, name: true, address: true, receiptName: true, gstin: true, upiId: true, phone: true, receiptFooter: true, isActive: true, deletedAt: true } }, counter: { select: { id: true, name: true } } } });
     if (!user || (user as any).deletedAt) return c.json({ error: "Invalid credentials" }, 401);
     if (!(user as any).isActive) return c.json({ error: "Account disabled" }, 403);
     // Deactivated shop blocks its staff/owner at login, refresh, and every
@@ -160,11 +160,11 @@ auth.post("/refresh", async (c) => {
         const sess = await prisma.session.findUnique({ where: { jti: incomingJti } });
         const hashOk = sess && sess.refreshHash === hashRefreshToken(token);
         if (!sess || sess.revokedAt || (sess as any).userId !== user.id || !hashOk || new Date((sess as any).expiresAt) < new Date()) {
-          // Reuse or theft: kill all device sessions now so the attacker can't keep refreshing.
-          try {
-            await prisma.session.updateMany({ where: { userId: user.id, revokedAt: null }, data: { revokedAt: new Date() } });
-          } catch { /* table missing — fall through */ }
-          await prisma.user.update({ where: { id: user.id }, data: { tokenVersion: { increment: 1 } } });
+          // Reuse or theft: kill all device sessions + bump version atomically.
+          await prisma.$transaction(async (tx) => {
+            await tx.session.updateMany({ where: { userId: user.id, revokedAt: null }, data: { revokedAt: new Date() } });
+            await tx.user.update({ where: { id: user.id }, data: { tokenVersion: { increment: 1 } } });
+          });
           const code = !sess || (sess as any).revokedAt || !hashOk ? "REUSE_DETECTED" : "TOKEN_EXPIRED";
           return c.json({ error: code === "REUSE_DETECTED" ? "Session reused — all sessions revoked, login again" : "Refresh token expired — login again", code }, 401);
         }
@@ -277,7 +277,9 @@ auth.get("/me", requireAuth as any, async (c) => {
     }
     return c.json({ user: sanitizeUser(user as any), shop: (user as any).shop ?? null, counters });
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);
+    const { toAppError: toAppErrMe } = await import("../lib/errors.js");
+    const appErr = toAppErrMe(e);
+    return c.json({ error: appErr.message, code: appErr.code }, 500);
   }
 });
 
@@ -305,12 +307,13 @@ auth.get("/verify", async (c) => {
     if (!row || (row as any).deletedAt || !(row as any).isActive) return c.json({ valid: false, error: "Account disabled" }, 403);
     if (((p as any).tv ?? 0) !== ((row as any).tokenVersion ?? 0)) return c.json({ valid: false, error: "Session revoked" }, 401);
     if ((p as any).jti) {
+      let sess: unknown = null;
       try {
-        const sess = await prisma.session.findUnique({ where: { jti: (p as any).jti } });
-        if (sess && (sess as any).revokedAt) return c.json({ valid: false, error: "Session revoked" }, 401);
+        sess = await prisma.session.findUnique({ where: { jti: (p as any).jti } });
       } catch {
-        // ignore — fail open
+        return c.json({ valid: false, error: "Database unavailable" }, 503);
       }
+      if (sess && (sess as any).revokedAt) return c.json({ valid: false, error: "Session revoked" }, 401);
     }
     if ((row as any).role !== "SUPER_ADMIN" && (row as any).shopId) {
       const sh = (row as any).shop;
