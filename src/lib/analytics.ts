@@ -27,29 +27,30 @@ export interface RangeBounds {
 }
 
 function clone(d: Date) { return new Date(d.getTime()); }
-function addDays(d: Date, n: number) { const x = clone(d); x.setDate(x.getDate() + n); return x; }
-function addMonths(d: Date, n: number) { const x = clone(d); x.setMonth(x.getMonth() + n); return x; }
-function addYears(d: Date, n: number) { const x = clone(d); x.setFullYear(x.getFullYear() + n); return x; }
+function addDays(d: Date, n: number) { return new Date(d.getTime() + n * 86_400_000); }
+function addMonths(d: Date, n: number) { const x = clone(d); x.setUTCMonth(x.getUTCMonth() + n); return x; }
+function addYears(d: Date, n: number) { const x = clone(d); x.setUTCFullYear(x.getUTCFullYear() + n); return x; }
 
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+function istMidnight(y: number, m1: number, day: number): Date {
+  return new Date(Date.UTC(y, m1 - 1, day, 0, 0, 0, 0) - IST_OFFSET_MS);
+}
+function istYMD(d: Date): { y: number; m: number; day: number; weekday: number } {
+  const ist = new Date(d.toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+  return { y: ist.getFullYear(), m: ist.getMonth() + 1, day: ist.getDate(), weekday: ist.getDay() };
+}
 function startOfWeek(d: Date) {
-  const x = startOfDay(d);
-  const day = x.getDay(); // 0 Sun
-  // Monday start
-  const diff = (day + 6) % 7;
-  x.setDate(x.getDate() - diff);
-  return x;
+  const { y, m, day, weekday } = istYMD(d);
+  const diff = (weekday + 6) % 7; // Monday start
+  return new Date(istMidnight(y, m, day).getTime() - diff * 86_400_000);
 }
 function startOfMonth(d: Date) {
-  const x = clone(d);
-  x.setHours(0,0,0,0);
-  x.setDate(1);
-  return x;
+  const { y, m } = istYMD(d);
+  return istMidnight(y, m, 1);
 }
 function startOfYear(d: Date) {
-  const x = clone(d);
-  x.setHours(0,0,0,0);
-  x.setMonth(0,1);
-  return x;
+  const { y } = istYMD(d);
+  return istMidnight(y, 1, 1);
 }
 
 const VALID_PRESETS = new Set<string>(["today","yesterday","3d","7d","15d","1m","2m","3m","6m","1y","2y","3y","5y","custom"]);

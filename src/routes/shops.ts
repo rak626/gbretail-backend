@@ -68,7 +68,9 @@ shops.get("/", async (c) => {
     if (!shop || (shop as any).deletedAt) return c.json({ shops: [] });
     return c.json({ shops: [shop] });
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);
+    const { toAppError: toAppErr } = await import("../lib/errors.js");
+    const appErr = toAppErr(e);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 401 | 403 | 404 | 409 | 500 | 503);
   }
 });
 
@@ -83,7 +85,9 @@ shops.get("/:id", async (c) => {
     if (user.role !== "SUPER_ADMIN" && user.shopId !== id) return c.json({ error: "Forbidden" }, 403);
     return c.json({ shop });
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);
+    const { toAppError: toAppErr } = await import("../lib/errors.js");
+    const appErr = toAppErr(e);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 401 | 403 | 404 | 409 | 500 | 503);
   }
 });
 
@@ -100,7 +104,9 @@ shops.post("/", requireRole("SUPER_ADMIN") as any, async (c) => {
     const shop = await prisma.shop.create({ data: { name, address, code: await allocateShopCode(), ...receipt } });
     return c.json({ shop }, 201);
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);
+    const { toAppError: toAppErr } = await import("../lib/errors.js");
+    const appErr = toAppErr(e);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 401 | 403 | 404 | 409 | 500 | 503);
   }
 });
 
@@ -135,7 +141,9 @@ shops.patch("/:id", async (c) => {
     const shop = await prisma.shop.update({ where: { id }, data });
     return c.json({ shop });
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);
+    const { toAppError: toAppErr } = await import("../lib/errors.js");
+    const appErr = toAppErr(e);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 401 | 403 | 404 | 409 | 500 | 503);
   }
 });
 
@@ -148,7 +156,9 @@ shops.delete("/:id", requireRole("SUPER_ADMIN") as any, async (c) => {
     const shop = await prisma.shop.update({ where: { id }, data: { deletedAt: new Date(), isActive: false } });
     return c.json({ shop, softDeleted: true });
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);
+    const { toAppError: toAppErr } = await import("../lib/errors.js");
+    const appErr = toAppErr(e);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 401 | 403 | 404 | 409 | 500 | 503);
   }
 });
 
@@ -162,7 +172,9 @@ shops.post("/:id/restore", requireRole("SUPER_ADMIN") as any, async (c) => {
     const shop = await prisma.shop.update({ where: { id }, data: { deletedAt: null, isActive: true } });
     return c.json({ shop });
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);
+    const { toAppError: toAppErr } = await import("../lib/errors.js");
+    const appErr = toAppErr(e);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 401 | 403 | 404 | 409 | 500 | 503);
   }
 });
 

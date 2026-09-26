@@ -294,13 +294,8 @@ customers.post("/", async (c) => {
     }
 
     if (trimmedPhone) {
-      const existing = await prisma.customer.findFirst({ where: { shopId, phone: trimmedPhone } });
-      if (existing && !(existing as any).deletedAt) return c.json({ error: "Customer with this phone already exists", customer: existing }, 409);
-      // if soft-deleted with same phone, allow reuse? Keep blocked — suggest restore; for now allow if deleted
-      if (existing && (existing as any).deletedAt) {
-        // optionally restore? We create new but phone uniqueness blocks — so update deleted one? For simplicity return conflict
-        return c.json({ error: "Phone belongs to a deleted customer — restore it first", customer: existing }, 409);
-      }
+      const existing = await prisma.customer.findFirst({ where: { shopId, phone: trimmedPhone, deletedAt: null } });
+      if (existing) return c.json({ error: "Customer with this phone already exists", code: "PHONE_TAKEN", customer: existing }, 409);
     }
 
     // Never trust client balance — always 0, modulated via orders/ledger tx
@@ -341,6 +336,14 @@ customers.patch("/:id", async (c) => {
       const exists = pre;
       if (!exists) return c.json({ error: "Not found" }, 404);
       if (!(exists as any).deletedAt) return c.json({ customer: exists, message: "Already active" });
+      if ((exists as any).phone) {
+        const clash = await prisma.customer.findFirst({
+          where: { shopId: (exists as any).shopId, phone: (exists as any).phone, deletedAt: null },
+        });
+        if (clash && clash.id !== id) {
+          return c.json({ error: "Phone already used by another active customer", code: "PHONE_TAKEN", customer: clash }, 409);
+        }
+      }
       const restored = await prisma.customer.update({ where: { id }, data: { deletedAt: null } });
       return c.json({ customer: restored });
     }
@@ -356,8 +359,8 @@ customers.patch("/:id", async (c) => {
       const raw = normalizePhone(body.phone);
       if (raw && !/^\d{10}$/.test(raw)) return c.json({ error: "Invalid phone" }, 400);
       if (raw) {
-        const dup = await prisma.customer.findFirst({ where: { shopId: (pre as any).shopId, phone: raw } });
-        if (dup && dup.id !== id && !(dup as { deletedAt?: Date | null }).deletedAt) return c.json({ error: "Phone already used by another customer", customer: dup }, 409);
+        const dup = await prisma.customer.findFirst({ where: { shopId: (pre as any).shopId, phone: raw, deletedAt: null } });
+        if (dup && dup.id !== id) return c.json({ error: "Phone already used by another customer", code: "PHONE_TAKEN", customer: dup }, 409);
       }
       allowed.phone = raw;
     }
@@ -382,10 +385,11 @@ customers.patch("/:id", async (c) => {
         allowed.creditLimit = v;
       }
     }
-    // block direct mutation of denormalized fields
+    // block direct mutation of denormalized fields — fail closed instead of silently ignoring
     const blocked = ["balance", "totalSpent", "totalOrders", "lastOrderAt", "firstOrderAt", "deletedAt", "createdAt", "updatedAt", "id", "shopId", "shop"];
-    for (const k of blocked) if (k in body && !(k in allowed)) {
-      // silently ignore blocked, don't error — but ensure not applied
+    const blockedHit = blocked.filter((k) => k in body);
+    if (blockedHit.length > 0) {
+      return c.json({ error: `Cannot update ${blockedHit.join(", ")} directly`, code: "IMMUTABLE_FIELD" }, 400);
     }
 
     if (Object.keys(allowed).length === 0) return c.json({ error: "No valid fields to update" }, 400);
@@ -433,10 +437,19 @@ customers.post("/:id/restore", async (c) => {
       return c.json({ error: "Forbidden — customer belongs to another shop" }, 403);
     }
     if (!(existing as { deletedAt?: Date | null }).deletedAt) return c.json({ customer: existing, message: "Already active" });
+    if ((existing as any).phone) {
+      const clash = await prisma.customer.findFirst({
+        where: { shopId: (existing as any).shopId, phone: (existing as any).phone, deletedAt: null },
+      });
+      if (clash && clash.id !== id) {
+        return c.json({ error: "Phone already used by another active customer", code: "PHONE_TAKEN", customer: clash }, 409);
+      }
+    }
     const customer = await prisma.customer.update({ where: { id }, data: { deletedAt: null } });
     return c.json({ customer });
   } catch (e) {
     const appErr = toAppError(e);
+    if (appErr.code === "CONFLICT") return c.json({ error: "Phone already used by another active customer", code: "PHONE_TAKEN" }, 409);
     return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 500 | 503);
   }
 });

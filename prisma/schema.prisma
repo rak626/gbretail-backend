@@ -76,10 +76,29 @@ model User {
   deletedAt    DateTime?
   orders       Order[]
   ledgerEntries LedgerEntry[]
+  sessions     Session[]
 
   @@index([shopId])
   @@index([role])
   @@index([deletedAt])
+}
+
+model Session {
+  id          String    @id @default(cuid())
+  jti         String    @unique
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // SHA-256 hex of the refresh token (never store the token itself)
+  refreshHash String
+  createdAt   DateTime  @default(now())
+  expiresAt   DateTime
+  revokedAt   DateTime?
+  // Rotation chain: old session -> new session, for reuse detection forensics
+  replacedBy  String?
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@index([userId, revokedAt])
 }
 
 model Product {
@@ -103,7 +122,7 @@ model Product {
   updatedAt      DateTime    @updatedAt
   orderItems     OrderItem[]
 
-  @@unique([shopId, barcode])
+  @@index([shopId, barcode])
   @@index([shopId])
   @@index([shopId, category])
   @@index([shopId, name])
@@ -133,7 +152,7 @@ model Customer {
   orders        Order[]
   ledgerEntries LedgerEntry[]
 
-  @@unique([shopId, phone])
+  @@index([shopId, phone])
   @@index([shopId])
   @@index([shopId, deletedAt])
   @@index([shopId, balance])

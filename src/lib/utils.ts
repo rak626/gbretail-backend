@@ -1,26 +1,34 @@
+// All shop-facing day bounds are Asia/Kolkata (no DST, fixed +5:30).
+// Server/Workers run UTC — server-local setHours() would shift billing days.
+// These helpers return absolute Dates for IST midnight / end-of-day.
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+
+function istParts(d: Date): { y: number; m: number; day: number } {
+  const fmt = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" });
+  const parts = fmt.formatToParts(d);
+  const map: Record<string, string> = {};
+  for (const p of parts) map[p.type] = p.value;
+  return { y: Number(map.year), m: Number(map.month), day: Number(map.day) };
+}
+
 export function startOfDay(d: Date) {
-  const x = new Date(d);
-  x.setHours(0, 0, 0, 0);
-  return x;
+  const { y, m, day } = istParts(d);
+  // IST midnight = UTC (midnight - 5:30)
+  return new Date(Date.UTC(y, m - 1, day, 0, 0, 0, 0) - IST_OFFSET_MS);
 }
 
 export function endOfDay(d: Date) {
-  const x = new Date(d);
-  x.setHours(23, 59, 59, 999);
-  return x;
+  const { y, m, day } = istParts(d);
+  return new Date(Date.UTC(y, m - 1, day, 23, 59, 59, 999) - IST_OFFSET_MS);
 }
 
 export function addDays(date: Date, days: number) {
-  const x = new Date(date);
-  x.setDate(x.getDate() + days);
-  return x;
+  return new Date(date.getTime() + days * 86_400_000);
 }
 
 export function computeDueDate(days: number): Date {
-  const now = new Date();
-  now.setHours(0, 0, 0, 0);
-  now.setDate(now.getDate() + days);
-  return now;
+  const base = startOfDay(new Date());
+  return new Date(base.getTime() + days * 86_400_000);
 }
 
 export function generateOrderNumber(date = new Date()) {

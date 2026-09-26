@@ -78,7 +78,9 @@ counters.post("/", requireRole("SUPER_ADMIN", "SHOP_OWNER") as any, async (c) =>
     const counter = await prisma.counter.create({ data: { shopId, name } });
     return c.json({ counter }, 201);
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);
+    const { toAppError: toAppErr2 } = await import("../lib/errors.js");
+    const appErr = toAppErr2(e);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 401 | 403 | 404 | 409 | 500 | 503);
   }
 });
 
@@ -107,7 +109,9 @@ counters.patch("/:id", requireRole("SUPER_ADMIN", "SHOP_OWNER") as any, async (c
     const updated = await prisma.counter.update({ where: { id }, data });
     return c.json({ counter: updated });
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);
+    const { toAppError: toAppErr2 } = await import("../lib/errors.js");
+    const appErr = toAppErr2(e);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 401 | 403 | 404 | 409 | 500 | 503);
   }
 });
 
@@ -125,7 +129,9 @@ counters.delete("/:id", requireRole("SUPER_ADMIN", "SHOP_OWNER") as any, async (
     const updated = await prisma.counter.update({ where: { id }, data: { deletedAt: new Date(), isActive: false } });
     return c.json({ counter: updated, softDeleted: true, unassignedStaff: unassign.count });
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);
+    const { toAppError: toAppErr2 } = await import("../lib/errors.js");
+    const appErr = toAppErr2(e);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 401 | 403 | 404 | 409 | 500 | 503);
   }
 });
 
@@ -141,7 +147,9 @@ counters.post("/:id/restore", requireRole("SUPER_ADMIN", "SHOP_OWNER") as any, a
     const updated = await prisma.counter.update({ where: { id }, data: { deletedAt: null, isActive: true } });
     return c.json({ counter: updated });
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);
+    const { toAppError: toAppErr2 } = await import("../lib/errors.js");
+    const appErr = toAppErr2(e);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 401 | 403 | 404 | 409 | 500 | 503);
   }
 });
 

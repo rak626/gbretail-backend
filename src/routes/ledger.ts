@@ -4,7 +4,7 @@ import { addDays, endOfDay, startOfDay, computeDueDate } from "../lib/utils.js";
 import { normalizePhone, parseCreditDays, normalizeCreditTerm } from "../lib/normalize.js";
 import { toAppError } from "../lib/errors.js";
 import { requireAuth } from "../middleware/auth.js";
-import { parseMoney, dec, MAX_MONEY } from "../lib/money.js";
+import { parseMoney, MAX_MONEY } from "../lib/money.js";
 import { getIdempotencyKey, isValidIdempotencyKey, fingerprint } from "../lib/idempotency.js";
 
 const ledger = new Hono();
@@ -293,7 +293,19 @@ ledger.post("/", async (c) => {
     }
 
     // Transaction: ledger + balance increment + shop/counter/user tracking
+    // Credit-limit enforced here (inside tx to avoid check-then-act race).
     const entry = await prisma.$transaction(async (tx) => {
+      const cust = await tx.customer.findUnique({ where: { id: resolvedCustomerId! }, select: { balance: true, creditLimit: true } });
+      if (!cust) throw new (await import("../lib/errors.js")).AppError(404, "Customer not found");
+      const canOverride = (body as any)?.overrideLimit === true && (user.role === "SHOP_OWNER" || user.role === "SUPER_ADMIN");
+      if (!canOverride && (cust as any).creditLimit != null) {
+        const { dec: decMoney } = await import("../lib/money.js");
+        const bal = decMoney((cust as any).balance);
+        const lim = decMoney((cust as any).creditLimit);
+        if (bal + parsedAmount > lim) {
+          throw new (await import("../lib/errors.js")).AppError(422, `Credit limit exceeded (balance ${bal.toFixed(2)} + due ${parsedAmount.toFixed(2)} > limit ${lim.toFixed(2)})`, "CREDIT_LIMIT_EXCEEDED");
+        }
+      }
       const e = await tx.ledgerEntry.create({
         data: {
           shopId: shopId!,
@@ -340,7 +352,7 @@ ledger.post("/", async (c) => {
       }
     }
     const appErr = toAppError(e);
-    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 404 | 409 | 500 | 503);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 404 | 409 | 422 | 500 | 503);
   }
 });
 
@@ -377,41 +389,61 @@ ledger.patch("/:id", async (c) => {
       if (entry.status === "settled") {
         return c.json({ entry, message: "Already settled" });
       }
+      // Idempotent conditional transition: only pending -> settled decrements balance once.
+      // Negative balances are allowed (overpay = advance) and surfaced to the UI.
       const result = await prisma.$transaction(async (tx) => {
-        const updated = await tx.ledgerEntry.update({
-          where: { id },
+        const upd = await tx.ledgerEntry.updateMany({
+          where: { id, status: "pending", deletedAt: null },
           data: { status: "settled", settledAt: new Date() },
-          include: { customer: { select: { id: true, name: true, phone: true, balance: true } }, order: { select: { id: true, orderNumber: true } } },
         });
+        if (upd.count === 0) {
+          const fresh = await tx.ledgerEntry.findUnique({
+            where: { id },
+            include: { customer: { select: { id: true, name: true, phone: true, balance: true } }, order: { select: { id: true, orderNumber: true } } },
+          });
+          return { updated: fresh, finalCustomer: (fresh as any)?.customer ?? null, already: true };
+        }
         await tx.customer.update({
           where: { id: entry.customerId },
           data: { balance: { decrement: entry.amount } },
         });
-        const cust = await tx.customer.findUnique({ where: { id: entry.customerId } });
-        if (cust && dec(cust.balance) < 0) {
-          await tx.customer.update({ where: { id: cust.id }, data: { balance: 0 } });
-        }
+        const updated = await tx.ledgerEntry.findUnique({
+          where: { id },
+          include: { customer: { select: { id: true, name: true, phone: true, balance: true } }, order: { select: { id: true, orderNumber: true } } },
+        });
         const finalCustomer = await tx.customer.findUnique({ where: { id: entry.customerId }, select: { id: true, name: true, phone: true, balance: true } });
-        return { updated, finalCustomer };
+        return { updated, finalCustomer, already: false };
       });
-      return c.json({ entry: { ...result.updated, customer: result.finalCustomer } });
+      if ((result as any).already) return c.json({ entry: (result as any).updated, message: "Already settled" });
+      return c.json({ entry: { ...(result as any).updated, customer: (result as any).finalCustomer } });
     }
 
     if (action === "reopen" || action === "undo") {
       if (entry.status !== "settled") {
         return c.json({ error: "Only settled entries can be reopened" }, 400);
       }
+      // Idempotent conditional transition: only settled -> pending increments balance once.
       const result = await prisma.$transaction(async (tx) => {
-        const updated = await tx.ledgerEntry.update({
-          where: { id },
+        const upd = await tx.ledgerEntry.updateMany({
+          where: { id, status: "settled", deletedAt: null },
           data: { status: "pending", settledAt: null },
+        });
+        if (upd.count === 0) {
+          const fresh = await tx.ledgerEntry.findUnique({
+            where: { id },
+            include: { customer: { select: { id: true, name: true, phone: true, balance: true } } },
+          });
+          return { updated: fresh, finalCustomer: (fresh as any)?.customer ?? null, already: true };
+        }
+        await tx.customer.update({ where: { id: entry.customerId }, data: { balance: { increment: entry.amount } } });
+        const updated = await tx.ledgerEntry.findUnique({
+          where: { id },
           include: { customer: { select: { id: true, name: true, phone: true, balance: true } } },
         });
-        await tx.customer.update({ where: { id: entry.customerId }, data: { balance: { increment: entry.amount } } });
         const finalCustomer = await tx.customer.findUnique({ where: { id: entry.customerId }, select: { id: true, name: true, phone: true, balance: true } });
-        return { updated, finalCustomer };
+        return { updated, finalCustomer, already: false };
       });
-      return c.json({ entry: { ...result.updated, customer: result.finalCustomer } });
+      return c.json({ entry: { ...(result as any).updated, customer: (result as any).finalCustomer } });
     }
 
     return c.json({ error: "Unknown action. Use settle or reopen" }, 400);
@@ -420,7 +452,7 @@ ledger.patch("/:id", async (c) => {
   }
 });
 
-// DELETE /api/ledger/:id — transactional soft delete
+// DELETE /api/ledger/:id — transactional soft delete (idempotent, allows negative balance)
 ledger.delete("/:id", async (c) => {
   const id = c.req.param("id");
   const { user, shopId } = getShopScope(c);
@@ -429,12 +461,15 @@ ledger.delete("/:id", async (c) => {
     if (!entry || (entry as any).deletedAt) return c.json({ error: "Not found" }, 404);
     if (shopId && (entry as any).shopId && (entry as any).shopId !== shopId && user.role !== "SUPER_ADMIN") return c.json({ error: "Forbidden" }, 403);
     await prisma.$transaction(async (tx) => {
+      const upd = await tx.ledgerEntry.updateMany({
+        where: { id, deletedAt: null },
+        data: { deletedAt: new Date() },
+      });
+      if (upd.count === 0) return;
       if (entry.status === "pending") {
+        // Negative allowed (over-delete = advance); no clamp to 0.
         await tx.customer.update({ where: { id: entry.customerId }, data: { balance: { decrement: entry.amount } } });
-        const cust = await tx.customer.findUnique({ where: { id: entry.customerId } });
-        if (cust && dec(cust.balance) < 0) await tx.customer.update({ where: { id: cust.id }, data: { balance: 0 } });
       }
-      await tx.ledgerEntry.update({ where: { id }, data: { deletedAt: new Date() } as any });
     });
     return c.json({ success: true, softDeleted: true });
   } catch (e) {
@@ -443,7 +478,7 @@ ledger.delete("/:id", async (c) => {
   }
 });
 
-// POST /api/ledger/:id/restore
+// POST /api/ledger/:id/restore (idempotent — re-increments only once)
 ledger.post("/:id/restore", async (c) => {
   const id = c.req.param("id");
   const { user, shopId } = getShopScope(c);
@@ -452,9 +487,10 @@ ledger.post("/:id/restore", async (c) => {
     if (!entry) return c.json({ error: "Not found" }, 404);
     if (!(entry as any).deletedAt) return c.json({ entry, message: "Already active" });
     if (shopId && (entry as any).shopId && (entry as any).shopId !== shopId && user.role !== "SUPER_ADMIN") return c.json({ error: "Forbidden" }, 403);
-    // restore also re-increment balance if pending
+    // restore also re-increment balance if pending — conditional so double-restore can't double-count
     await prisma.$transaction(async (tx) => {
-      await tx.ledgerEntry.update({ where: { id }, data: { deletedAt: null } as any });
+      const upd = await tx.ledgerEntry.updateMany({ where: { id, deletedAt: { not: null } }, data: { deletedAt: null } });
+      if (upd.count === 0) return;
       if (entry.status === "pending") {
         await tx.customer.update({ where: { id: entry.customerId }, data: { balance: { increment: entry.amount } } });
       }

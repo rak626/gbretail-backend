@@ -12,6 +12,7 @@ import {
   LEDGER_AGING_BUCKETS,
 } from "../lib/analytics.js";
 import { requireAuth } from "../middleware/auth.js";
+import { startOfDay } from "../lib/utils.js";
 
 const analytics = new Hono();
 
@@ -21,11 +22,13 @@ analytics.use("*", requireAuth as any);
 const cache = new Map<string, { ts: number; data: any }>();
 const CACHE_TTL = 30_000;
 function cacheKey(c: any) {
-  // Key on user+role as well as URL — summary/sections are role- and
-  // shop-scoped, so a shared URL key would leak one role's data to another.
+  // Key on user+role+resolved shop as well as URL — summary/sections are role- and
+  // shop-scoped, so a shared URL key would leak one shop/role's data to another.
+  // SUPER_ADMIN switches shops via x-shop-id; include the header explicitly.
   const u = (c as any).get("user" as any) as any;
+  const shopId = ((c as any).get("shopId" as any) as string | null) || u?.shopId || c.req.query("shopId") || c.req.header("x-shop-id") || c.req.header("X-Shop-Id") || "";
   const url = c.req.url;
-  return `${u?.userId ?? "?"}:${u?.role ?? "?"}:${url}`;
+  return `${u?.userId ?? "?"}:${u?.role ?? "?"}:${shopId}:${url}`;
 }
 function getCached(key: string) {
   const v = cache.get(key);
@@ -61,6 +64,12 @@ analytics.get("/summary", async (c) => {
   try {
     const bounds = getRangeBounds(presetRaw, fromRaw, toRaw, granularityRaw);
     const { start, end, granularity, label } = bounds;
+    // Cap range to 366 days — 5y at day granularity would OOM (full order+item load).
+    // Longer ranges must use month granularity (already default for 1y+).
+    const rangeDays = (end.getTime() - start.getTime()) / 86_400_000;
+    if (rangeDays > 366) {
+      return c.json({ error: "Range too large (max 366 days) — use a shorter preset or custom range", code: "RANGE_TOO_LARGE" }, 400);
+    }
     const prev = getPrevRange(bounds);
 
     // Fetch orders in range + prev range for delta — scoped to shop
@@ -84,7 +93,7 @@ analytics.get("/summary", async (c) => {
       }),
       prisma.ledgerEntry.findMany({
         where: { settledAt: { gte: start, lte: end }, status: "settled", deletedAt: null, ...shopFilter } as any,
-        select: { amount: true, settledAt: true },
+        select: { amount: true, settledAt: true, createdAt: true },
       }),
       prisma.ledgerEntry.findMany({
         where: { status: "pending", deletedAt: null, ...shopFilter } as any,
@@ -271,35 +280,26 @@ analytics.get("/summary", async (c) => {
       };
     });
 
-    // Ledger analytics
+    // Ledger analytics (paise-integer sums to avoid binary-float drift)
+    const toPaise = (n: unknown) => Math.round(Number(n) * 100);
     const ledgerCreatedCount = ledgerCreated.length;
-    const ledgerCreatedAmount = ledgerCreated.reduce((s, e) => s + Number(e.amount), 0);
+    const ledgerCreatedAmount = ledgerCreated.reduce((s, e) => s + toPaise(e.amount), 0) / 100;
     const ledgerSettledCount = ledgerSettled.length;
-    const ledgerSettledAmount = ledgerSettled.reduce((s, e) => s + Number(e.amount), 0);
+    const ledgerSettledAmount = ledgerSettled.reduce((s, e) => s + toPaise(e.amount), 0) / 100;
     const ledgerPendingCount = ledgerPending.length;
-    const ledgerPendingAmount = ledgerPending.reduce((s, e) => s + Number(e.amount), 0);
-    const ledgerOverdue = ledgerPending.filter(e => new Date(e.dueDate) < new Date(new Date().setHours(0,0,0,0)));
+    const ledgerPendingAmount = ledgerPending.reduce((s, e) => s + toPaise(e.amount), 0) / 100;
+    const ledgerOverdue = ledgerPending.filter(e => new Date(e.dueDate) < startOfDay(new Date()));
     const ledgerOverdueCount = ledgerOverdue.length;
-    const ledgerOverdueAmount = ledgerOverdue.reduce((s,e)=>s+Number(e.amount),0);
+    const ledgerOverdueAmount = ledgerOverdue.reduce((s,e)=>s+toPaise(e.amount),0) / 100;
     const collectionRate = (ledgerCreatedAmount + ledgerPendingAmount) ? (ledgerSettledAmount / (ledgerSettledAmount + ledgerPendingAmount) * 100) : 0;
-    // avg days to settle: for settled entries in range, avg(settledAt - createdAt)
-    // Need to fetch settled entries with createdAt to compute avg; we only have settledAt, need createdAt too. Refetch? Use ledgerSettled already filtered by settledAt range, but we didn't select createdAt. Let's approximate without.
-    // For quick, compute avg days for those settled entries we have if we had createdAt. Since we selected only amount/settledAt, fallback to 0.
-    // Instead fetch more: we already have ledgerSettled without createdAt; compute 0.
+    // avg days to settle from the already-fetched rows (createdAt selected above — no re-query).
     let avgDaysToSettle: number | null = null;
     if (ledgerSettled.length > 0) {
-      // Re-query with createdAt for accurate — shop scoped
-      const withCreated = await prisma.ledgerEntry.findMany({
-        where: { settledAt: { gte: start, lte: end }, status: "settled", deletedAt: null, ...shopFilter } as any,
-        select: { createdAt: true, settledAt: true },
-      });
-      if (withCreated.length) {
-        const totalDays = withCreated.reduce((s, e) => {
-          const diff = (new Date(e.settledAt as Date).getTime() - new Date(e.createdAt).getTime()) / (1000*60*60*24);
-          return s + diff;
-        }, 0);
-        avgDaysToSettle = totalDays / withCreated.length;
-      }
+      const totalDays = (ledgerSettled as any[]).reduce((s, e) => {
+        if (!e.settledAt || !e.createdAt) return s;
+        return s + (new Date(e.settledAt as Date).getTime() - new Date(e.createdAt).getTime()) / 86_400_000;
+      }, 0);
+      avgDaysToSettle = totalDays / ledgerSettled.length;
     }
 
     // Aging buckets
@@ -421,6 +421,9 @@ analytics.get("/sections", async (c) => {
   try {
     const bounds = getRangeBounds(presetRaw, fromRaw, toRaw, undefined);
     const { start, end, label } = bounds;
+    if ((end.getTime() - start.getTime()) / 86_400_000 > 366) {
+      return c.json({ error: "Range too large (max 366 days)", code: "RANGE_TOO_LARGE" }, 400);
+    }
 
     // Range orders (scoped) with staff/counter/customer attribution + item units
     const orders = await prisma.order.findMany({
@@ -573,6 +576,9 @@ analytics.get("/export", async (c) => {
   try {
     const bounds = getRangeBounds(presetRaw, fromRaw, toRaw, granularityRaw);
     const { start, end, granularity } = bounds;
+    if ((end.getTime() - start.getTime()) / 86_400_000 > 366) {
+      return c.json({ error: "Range too large (max 366 days)", code: "RANGE_TOO_LARGE" }, 400);
+    }
 
     // Reuse summary logic by internal fetch? Instead duplicate light query for export: timeseries + topProducts + categories
     // For export we need flat CSV: section timeseries, top products, categories, ledger aging

@@ -35,6 +35,22 @@ function parseOrigins(): string[] {
 const DEV_ACCESS = "dev-access-secret-change-me-32chars";
 const DEV_REFRESH = "dev-refresh-secret-change-me-32chars";
 
+// JWT expiresIn must be jsonwebtoken-compatible (e.g. "15m", "7d", "3600").
+// Fail fast on garbage so tokens don't silently get wrong lifetimes.
+const EXPIRES_RE = /^(\d+)(ms|s|m|h|d|w)?$/;
+function parseExpiresIn(raw: string, fallback: string): string {
+  const v = (raw ?? "").trim() || fallback;
+  if (!EXPIRES_RE.test(v)) throw new Error(`Invalid JWT expiry: ${raw} (expected e.g. 15m, 7d)`);
+  return v;
+}
+
+function parseBcryptRounds(): number {
+  const raw = parseInt(env("BCRYPT_ROUNDS", "10")!, 10);
+  if (isNaN(raw)) return 10;
+  // Clamp: <8 insecure, >14 DoS-risk on login (bcrypt cost doubles each step)
+  return Math.min(14, Math.max(8, raw));
+}
+
 // Use getters so applyEnv(c.env) per-request is reflected live in Workers.
 export const config = {
   get port() { return parsePort(); },
@@ -47,9 +63,9 @@ export const config = {
   get isWorker() { return env("WORKER") === "1" || env("CF_WORKER") === "1"; },
   get jwtAccessSecret() { return env("JWT_ACCESS_SECRET", DEV_ACCESS)!; },
   get jwtRefreshSecret() { return env("JWT_REFRESH_SECRET", DEV_REFRESH)!; },
-  get jwtAccessExpiresIn() { return env("JWT_ACCESS_EXPIRES_IN", "15m")!; },
-  get jwtRefreshExpiresIn() { return env("JWT_REFRESH_EXPIRES_IN", "7d")!; },
-  get bcryptRounds() { return parseInt(env("BCRYPT_ROUNDS", "10")!, 10) || 10; },
+  get jwtAccessExpiresIn() { return parseExpiresIn(env("JWT_ACCESS_EXPIRES_IN", "15m")!, "15m"); },
+  get jwtRefreshExpiresIn() { return parseExpiresIn(env("JWT_REFRESH_EXPIRES_IN", "7d")!, "7d"); },
+  get bcryptRounds() { return parseBcryptRounds(); },
 };
 
 export function getCorsOrigins(): string[] {

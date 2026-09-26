@@ -175,7 +175,7 @@ orders.post("/", async (c) => {
     const shop = await prisma.shop.findUnique({ where: { id: shopId! } });
     if (!shop || (shop as any).deletedAt || !(shop as any).isActive) return c.json({ error: "Shop not found or inactive" }, 404);
 
-    let { items, total, discount = 0, paymentMethod, customerId, customerName, customerPhone, status = "completed", creditDays, customDays, counterId, splitCash, splitUpi } = body;
+    let { items, total, discount = 0, paymentMethod, customerId, customerName, customerPhone, status = "completed", creditDays, customDays, counterId, splitCash, splitUpi, overrideLimit } = body;
 
     if (!Array.isArray(items) || items.length === 0) {
       return c.json({ error: "Items required" }, 400);
@@ -317,6 +317,15 @@ orders.post("/", async (c) => {
         if (phone) {
           const existing = await tx.customer.findFirst({ where: { shopId: shopId!, phone } });
           if (existing) {
+            // Credit-limit enforcement (owner/super may override explicitly)
+            const canOverride = overrideLimit === true && (user.role === "SHOP_OWNER" || user.role === "SUPER_ADMIN");
+            if (!canOverride && (existing as any).creditLimit != null) {
+              const bal = dec((existing as any).balance);
+              const lim = dec((existing as any).creditLimit);
+              if (bal + Number(total) > lim) {
+                throw new AppError(422, `Credit limit exceeded (balance ${bal.toFixed(2)} + bill ${Number(total).toFixed(2)} > limit ${lim.toFixed(2)})`, "CREDIT_LIMIT_EXCEEDED");
+              }
+            }
             resolvedCustomerId = existing.id;
             const isFirst = !(existing as { firstOrderAt?: Date | null }).firstOrderAt;
             await tx.customer.update({
@@ -352,12 +361,22 @@ orders.post("/", async (c) => {
           resolvedCustomerId = cust.id;
         }
       } else if (resolvedCustomerId) {
-        const existing = await tx.customer.findUnique({ where: { id: resolvedCustomerId }, select: { firstOrderAt: true, deletedAt: true, shopId: true } });
+        const existing = await tx.customer.findUnique({ where: { id: resolvedCustomerId }, select: { firstOrderAt: true, deletedAt: true, shopId: true, balance: true, creditLimit: true } });
         if (!existing) {
           throw new AppError(404, "Customer not found");
         }
         if ((existing as any).shopId !== shopId && user.role !== "SUPER_ADMIN") {
           throw new AppError(403, "Customer belongs to another shop");
+        }
+        if (paymentMethod === "khata") {
+          const canOverride = overrideLimit === true && (user.role === "SHOP_OWNER" || user.role === "SUPER_ADMIN");
+          if (!canOverride && (existing as any).creditLimit != null) {
+            const bal = dec((existing as any).balance);
+            const lim = dec((existing as any).creditLimit);
+            if (bal + Number(total) > lim) {
+              throw new AppError(422, `Credit limit exceeded (balance ${bal.toFixed(2)} + bill ${Number(total).toFixed(2)} > limit ${lim.toFixed(2)})`, "CREDIT_LIMIT_EXCEEDED");
+            }
+          }
         }
         const isFirst = !existing?.firstOrderAt;
         await tx.customer.update({
@@ -515,22 +534,62 @@ orders.post("/", async (c) => {
     }
     console.error("[POST /orders]", e);
     const appErr = toAppError(e);
-    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 404 | 409 | 500 | 503);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 404 | 409 | 422 | 500 | 503);
   }
 });
 
-// DELETE /api/orders/:id — soft delete
+// DELETE /api/orders/:id — void with reversal. Blocked when a ledger entry is linked:
+// settle/delete the ledger first so khata balances never diverge silently.
 orders.delete("/:id", async (c) => {
   const id = c.req.param("id");
   const { user, shopId } = getShopScope(c);
   try {
-    const existing = await prisma.order.findUnique({ where: { id } });
+    const existing = await prisma.order.findUnique({
+      where: { id },
+      include: { items: true, ledgerEntries: { where: { deletedAt: null } } },
+    });
     if (!existing || (existing as any).deletedAt) return c.json({ error: "Not found" }, 404);
     if (shopId && (existing as any).shopId && (existing as any).shopId !== shopId && user.role !== "SUPER_ADMIN") return c.json({ error: "Forbidden" }, 403);
-    const updated = await prisma.order.update({ where: { id }, data: { deletedAt: new Date() } as any });
+    if ((existing as any).ledgerEntries?.length > 0) {
+      return c.json(
+        { error: "Order has linked khata entries — settle or delete them first", code: "LEDGER_LINKED", ledgerEntryIds: (existing as any).ledgerEntries.map((e: any) => e.id) },
+        409
+      );
+    }
+    const orderTotal = Number((existing as any).total ?? 0);
+    const customerId = (existing as any).customerId as string | null;
+    await prisma.$transaction(async (tx) => {
+      const upd = await tx.order.updateMany({ where: { id, deletedAt: null }, data: { deletedAt: new Date() } });
+      if (upd.count === 0) return;
+      // Restore stock for non-custom items
+      for (const it of (existing as any).items ?? []) {
+        if (!it.isCustom && it.productId) {
+          const qty = Number(it.quantity ?? it.weight ?? 0);
+          if (qty > 0) {
+            await tx.product.updateMany({ where: { id: String(it.productId) }, data: { stockQuantity: { increment: qty } } });
+          }
+        }
+      }
+      // Reverse customer aggregates (totalSpent/totalOrders; balance untouched — no ledger linked by guard above)
+      if (customerId) {
+        await tx.customer.updateMany({
+          where: { id: customerId },
+          data: { totalSpent: { decrement: orderTotal }, totalOrders: { decrement: 1 } },
+        });
+        // Clamp totalSpent at 0 (aggregates, not money owed) and recompute lastOrderAt
+        const cust = await tx.customer.findUnique({ where: { id: customerId }, select: { totalSpent: true } });
+        if (cust && Number((cust as any).totalSpent) < 0) {
+          await tx.customer.update({ where: { id: customerId }, data: { totalSpent: 0 } });
+        }
+        const last = await tx.order.findFirst({ where: { customerId, deletedAt: null }, orderBy: { createdAt: "desc" }, select: { createdAt: true } });
+        await tx.customer.update({ where: { id: customerId }, data: { lastOrderAt: last ? (last as any).createdAt : null } });
+      }
+    });
+    const updated = await prisma.order.findUnique({ where: { id }, include: { items: true, customer: true } });
     return c.json({ order: updated, softDeleted: true });
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 404 | 409 | 422 | 500 | 503);
   }
 });
 
@@ -538,14 +597,46 @@ orders.post("/:id/restore", async (c) => {
   const id = c.req.param("id");
   const { user, shopId } = getShopScope(c);
   try {
-    const existing = await prisma.order.findUnique({ where: { id } });
+    const existing = await prisma.order.findUnique({ where: { id }, include: { items: true } });
     if (!existing) return c.json({ error: "Not found" }, 404);
     if (!(existing as any).deletedAt) return c.json({ order: existing, message: "Already active" });
     if (shopId && (existing as any).shopId && (existing as any).shopId !== shopId && user.role !== "SUPER_ADMIN") return c.json({ error: "Forbidden" }, 403);
-    const updated = await prisma.order.update({ where: { id }, data: { deletedAt: null } as any });
-    return c.json({ order: updated });
+    const orderTotal = Number((existing as any).total ?? 0);
+    const customerId = (existing as any).customerId as string | null;
+    try {
+      await prisma.$transaction(async (tx) => {
+        // Re-apply stock with availability check — fail if product deleted or insufficient
+        for (const it of (existing as any).items ?? []) {
+          if (!it.isCustom && it.productId) {
+            const qty = Number(it.quantity ?? it.weight ?? 0);
+            if (qty <= 0) continue;
+            const prod = await tx.product.findUnique({ where: { id: String(it.productId) } });
+            if (!prod || (prod as any).deletedAt) throw new AppError(409, `Cannot restore — product ${(it as any).name} is deleted`);
+            const res = await tx.product.updateMany({
+              where: { id: String(it.productId), stockQuantity: { gte: qty } },
+              data: { stockQuantity: { decrement: qty } },
+            });
+            if ((res as any).count === 0) {
+              const fresh = await tx.product.findUnique({ where: { id: String(it.productId) }, select: { stockQuantity: true, name: true } });
+              throw new AppError(409, `Cannot restore — insufficient stock for ${fresh?.name ?? (it as any).name}`);
+            }
+          }
+        }
+        const upd = await tx.order.updateMany({ where: { id, deletedAt: { not: null } }, data: { deletedAt: null } });
+        if (upd.count === 0) return;
+        if (customerId) {
+          await tx.customer.update({ where: { id: customerId }, data: { totalSpent: { increment: orderTotal }, totalOrders: { increment: 1 }, lastOrderAt: new Date() } });
+        }
+      });
+    } catch (txErr) {
+      const appErr = toAppError(txErr);
+      return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 404 | 409 | 500 | 503);
+    }
+    const restored = await prisma.order.findUnique({ where: { id }, include: { items: true, customer: true } });
+    return c.json({ order: restored });
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 404 | 409 | 500 | 503);
   }
 });
 

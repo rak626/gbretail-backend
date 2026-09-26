@@ -26,7 +26,9 @@ users.get("/", async (c) => {
     const self = await prisma.user.findUnique({ where: { id: user.userId }, select: { id: true, shopId: true, email: true, name: true, role: true, canManageInventory: true, counterId: true, isActive: true, createdAt: true } });
     return c.json({ users: self ? [self] : [] });
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);
+    const { toAppError } = await import("../lib/errors.js");
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 401 | 403 | 404 | 409 | 500 | 503);
   }
 });
 
@@ -41,7 +43,9 @@ users.get("/:id", async (c) => {
     if (user.role === "STAFF" && user.userId !== id) return c.json({ error: "Forbidden" }, 403);
     return c.json({ user: target });
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);
+    const { toAppError } = await import("../lib/errors.js");
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 401 | 403 | 404 | 409 | 500 | 503);
   }
 });
 
@@ -105,7 +109,9 @@ users.post("/", requireRole("SUPER_ADMIN", "SHOP_OWNER") as any, async (c) => {
     });
     return c.json({ user: created }, 201);
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);
+    const { toAppError } = await import("../lib/errors.js");
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 401 | 403 | 404 | 409 | 500 | 503);
   }
 });
 
@@ -205,9 +211,18 @@ users.patch("/:id", async (c) => {
 
     if (Object.keys(data).length === 0) return c.json({ error: "No valid fields" }, 400);
     const updated = await prisma.user.update({ where: { id }, data, select: { id: true, shopId: true, email: true, name: true, role: true, canManageInventory: true, counterId: true, isActive: true, createdAt: true } });
+    if ((data as any).tokenVersion) {
+      try {
+        await prisma.session.updateMany({ where: { userId: id, revokedAt: null }, data: { revokedAt: new Date() } });
+      } catch {
+        // Session table missing — tokenVersion bump already kills all.
+      }
+    }
     return c.json({ user: updated });
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);
+    const { toAppError } = await import("../lib/errors.js");
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 401 | 403 | 404 | 409 | 500 | 503);
   }
 });
 
@@ -223,7 +238,9 @@ users.delete("/:id", requireRole("SUPER_ADMIN", "SHOP_OWNER") as any, async (c) 
     const updated = await prisma.user.update({ where: { id }, data: { deletedAt: new Date(), isActive: false } });
     return c.json({ user: { id: updated.id }, softDeleted: true });
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);
+    const { toAppError } = await import("../lib/errors.js");
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 401 | 403 | 404 | 409 | 500 | 503);
   }
 });
 
@@ -239,7 +256,9 @@ users.post("/:id/restore", requireRole("SUPER_ADMIN", "SHOP_OWNER") as any, asyn
     const updated = await prisma.user.update({ where: { id }, data: { deletedAt: null, isActive: true }, select: { id: true, shopId: true, email: true, name: true, role: true, canManageInventory: true, counterId: true, isActive: true } });
     return c.json({ user: updated });
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);
+    const { toAppError } = await import("../lib/errors.js");
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 401 | 403 | 404 | 409 | 500 | 503);
   }
 });
 
@@ -259,9 +278,16 @@ users.post("/:id/revoke-sessions", async (c) => {
       if (actor.role !== "SUPER_ADMIN" && actor.role !== "SHOP_OWNER") return c.json({ error: "Forbidden" }, 403);
     }
     const updated = await prisma.user.update({ where: { id }, data: { tokenVersion: { increment: 1 } }, select: { id: true, tokenVersion: true } });
+    try {
+      await prisma.session.updateMany({ where: { userId: id, revokedAt: null }, data: { revokedAt: new Date() } });
+    } catch {
+      // Session table missing during rollout — tokenVersion bump already kills all.
+    }
     return c.json({ user: { id: updated.id }, sessionsRevoked: true });
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);
+    const { toAppError } = await import("../lib/errors.js");
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 404 | 500 | 503);
   }
 });
 

@@ -1,17 +1,47 @@
 import { Hono } from "hono";
 import { setCookie, getCookie, deleteCookie } from "hono/cookie";
 import { prisma } from "../lib/prisma.js";
-import { verifyPassword, signAccessToken, signRefreshToken, verifyRefreshToken, verifyAccessToken, sanitizeUser } from "../lib/auth.js";
+import { verifyPassword, signAccessToken, signRefreshToken, verifyRefreshToken, verifyAccessToken, sanitizeUser, newJti, hashRefreshToken } from "../lib/auth.js";
 import { resolveStaffCounter } from "../lib/staffCounter.js";
 import { requireAuth } from "../middleware/auth.js";
 import { config } from "../config.js";
 
 const auth = new Hono();
 
+function refreshExpiryDate(): Date {
+  const raw = config.jwtRefreshExpiresIn;
+  const m = /^(\d+)(ms|s|m|h|d|w)?$/.exec(raw);
+  const n = m ? parseInt(m[1], 10) : 7;
+  const unit = m?.[2] ?? "d";
+  const ms = unit === "ms" ? n : unit === "s" ? n * 1000 : unit === "m" ? n * 60_000 : unit === "h" ? n * 3_600_000 : unit === "w" ? n * 7 * 86_400_000 : n * 86_400_000;
+  return new Date(Date.now() + ms);
+}
+
+async function createSession(userId: string, jti: string, refreshToken: string): Promise<void> {
+  try {
+    await prisma.session.create({ data: { jti, userId, refreshHash: hashRefreshToken(refreshToken), expiresAt: refreshExpiryDate() } });
+  } catch {
+    // Table missing during rollout or race — login still succeeds; refresh falls back to legacy tv check.
+  }
+}
+
+async function revokeSession(jti: string, replacedBy?: string): Promise<void> {
+  try {
+    await prisma.session.updateMany({ where: { jti, revokedAt: null }, data: { revokedAt: new Date(), ...(replacedBy ? { replacedBy } : {}) } });
+  } catch {
+    // ignore — table may not exist yet
+  }
+}
+
 // POST /api/auth/login {email, password, counterId?}
 auth.post("/login", async (c) => {
+  let body: any;
   try {
-    const body = await c.req.json();
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "Invalid JSON body", code: "INVALID_JSON" }, 400);
+  }
+  try {
     const email = String(body.email ?? "").trim().toLowerCase();
     const password = String(body.password ?? "");
     const counterId = body.counterId ? String(body.counterId) : null;
@@ -62,10 +92,12 @@ auth.post("/login", async (c) => {
       email: (user as any).email,
       name: (user as any).name,
       tv: (user as any).tokenVersion ?? 0,
+      jti: newJti(),
     };
 
     const accessToken = signAccessToken(payload as any);
-    const refreshToken = signRefreshToken({ userId: user.id, shopId: (user as any).shopId ?? null, role: (user as any).role, tv: (user as any).tokenVersion ?? 0 });
+    const refreshToken = signRefreshToken({ userId: user.id, shopId: (user as any).shopId ?? null, role: (user as any).role, tv: (user as any).tokenVersion ?? 0, jti: (payload as any).jti } as any);
+    await createSession(user.id, (payload as any).jti, refreshToken);
 
     // Set httpOnly cookies for refresh + optional access fallback
     const isProduction = config.isProduction;
@@ -94,12 +126,13 @@ auth.post("/login", async (c) => {
       counter: resolvedCounterId ? { id: resolvedCounterId, name: resolvedCounterName } : null,
     });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Login failed";
-    return c.json({ error: msg }, 500);
+    const { toAppError } = await import("../lib/errors.js");
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 401 | 403 | 500 | 503);
   }
 });
 
-// POST /api/auth/refresh {refreshToken?} or cookie
+// POST /api/auth/refresh {refreshToken?} or cookie — single-use rotation with reuse detection
 auth.post("/refresh", async (c) => {
   try {
     let token: string | undefined;
@@ -120,6 +153,29 @@ auth.post("/refresh", async (c) => {
       if (!sh || (sh as any).deletedAt || !(sh as any).isActive) return c.json({ error: "Shop disabled", code: "SHOP_DISABLED" }, 403);
     }
 
+    // Per-device rotation: legacy tokens (no jti, issued before sessions) skip the check.
+    const incomingJti = decoded.jti as string | undefined;
+    if (incomingJti) {
+      try {
+        const sess = await prisma.session.findUnique({ where: { jti: incomingJti } });
+        const hashOk = sess && sess.refreshHash === hashRefreshToken(token);
+        if (!sess || sess.revokedAt || (sess as any).userId !== user.id || !hashOk || new Date((sess as any).expiresAt) < new Date()) {
+          // Reuse or theft: kill all device sessions now so the attacker can't keep refreshing.
+          try {
+            await prisma.session.updateMany({ where: { userId: user.id, revokedAt: null }, data: { revokedAt: new Date() } });
+          } catch { /* table missing — fall through */ }
+          await prisma.user.update({ where: { id: user.id }, data: { tokenVersion: { increment: 1 } } });
+          const code = !sess || (sess as any).revokedAt || !hashOk ? "REUSE_DETECTED" : "TOKEN_EXPIRED";
+          return c.json({ error: code === "REUSE_DETECTED" ? "Session reused — all sessions revoked, login again" : "Refresh token expired — login again", code }, 401);
+        }
+      } catch (e) {
+        // If the error is our own reuse-revocation path above, it already returned.
+        // prisma.session missing (rollout) → fall through to legacy behavior.
+        if (e instanceof Error && (e.message.includes("REUSE") || (e as any).code)) throw e;
+      }
+    }
+
+    const nextJti = newJti();
     const payload = {
       userId: user.id,
       shopId: (user as any).shopId ?? null,
@@ -127,9 +183,14 @@ auth.post("/refresh", async (c) => {
       email: (user as any).email,
       name: (user as any).name,
       tv: (user as any).tokenVersion ?? 0,
+      jti: nextJti,
     };
     const accessToken = signAccessToken(payload as any);
-    const newRefresh = signRefreshToken({ userId: user.id, shopId: (user as any).shopId ?? null, role: (user as any).role, tv: (user as any).tokenVersion ?? 0 });
+    const newRefresh = signRefreshToken({ userId: user.id, shopId: (user as any).shopId ?? null, role: (user as any).role, tv: (user as any).tokenVersion ?? 0, jti: nextJti } as any);
+    if (incomingJti) {
+      await revokeSession(incomingJti, nextJti);
+    }
+    await createSession(user.id, nextJti, newRefresh);
 
     const isProduction = config.isProduction;
     setCookie(c, "refreshToken", newRefresh, {
@@ -155,7 +216,7 @@ auth.post("/refresh", async (c) => {
   }
 });
 
-// POST /api/auth/logout — bumps tokenVersion to revoke stolen access tokens immediately.
+// POST /api/auth/logout — revokes only this device (jti). Use revoke-sessions for kill-all.
 auth.post("/logout", async (c) => {
   try {
     const authHeader = c.req.header("authorization") || c.req.header("Authorization") || "";
@@ -171,14 +232,25 @@ auth.post("/logout", async (c) => {
     }
     if (token) {
       try {
-        const p = verifyAccessToken(token);
-        await prisma.user.update({
-          where: { id: (p as any).userId },
-          data: { tokenVersion: { increment: 1 } },
-        });
+        const p = verifyAccessToken(token) as any;
+        if (p?.jti) await revokeSession(p.jti);
       } catch {
-        // Invalid/expired token — still clear cookies below.
+        // Invalid/expired token — still try refresh below, then clear cookies.
       }
+    }
+    try {
+      const body = await c.req.json().catch(() => ({}));
+      const refresh = (body as any)?.refreshToken || getCookie(c, "refreshToken");
+      if (refresh) {
+        try {
+          const rp = verifyRefreshToken(refresh) as any;
+          if (rp?.jti) await revokeSession(rp.jti);
+        } catch {
+          // expired/invalid refresh — nothing to revoke
+        }
+      }
+    } catch {
+      // never block logout on body parse errors
     }
   } catch {
     // never block logout on DB errors
@@ -232,6 +304,14 @@ auth.get("/verify", async (c) => {
     });
     if (!row || (row as any).deletedAt || !(row as any).isActive) return c.json({ valid: false, error: "Account disabled" }, 403);
     if (((p as any).tv ?? 0) !== ((row as any).tokenVersion ?? 0)) return c.json({ valid: false, error: "Session revoked" }, 401);
+    if ((p as any).jti) {
+      try {
+        const sess = await prisma.session.findUnique({ where: { jti: (p as any).jti } });
+        if (sess && (sess as any).revokedAt) return c.json({ valid: false, error: "Session revoked" }, 401);
+      } catch {
+        // ignore — fail open
+      }
+    }
     if ((row as any).role !== "SUPER_ADMIN" && (row as any).shopId) {
       const sh = (row as any).shop;
       if (!sh || (sh as any).deletedAt || !(sh as any).isActive) return c.json({ valid: false, error: "Shop disabled" }, 403);

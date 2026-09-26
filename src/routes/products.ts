@@ -340,7 +340,9 @@ products.delete("/:id", async (c) => {
     const product = await prisma.product.update({ where: { id }, data: { deletedAt: new Date() } as any });
     return c.json({ success: true, softDeleted: true, product });
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Error" }, 500);
+    const { toAppError } = await import("../lib/errors.js");
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 404 | 409 | 500 | 503);
   }
 });
 
@@ -357,10 +359,23 @@ products.post("/:id/restore", async (c) => {
     if (shopId && (existing as any).shopId && (existing as any).shopId !== shopId && user.role !== "SUPER_ADMIN") {
       return c.json({ error: "Forbidden" }, 403);
     }
+    // Active-only uniqueness: refuse restore if another active product took the barcode
+    if ((existing as any).barcode) {
+      const clash = await prisma.product.findFirst({
+        where: { shopId: (existing as any).shopId, barcode: (existing as any).barcode, deletedAt: null } as any,
+      });
+      if (clash && (clash as any).id !== id) {
+        return c.json({ error: "Barcode already used by another active product", code: "BARCODE_TAKEN" }, 409);
+      }
+    }
     const product = await prisma.product.update({ where: { id }, data: { deletedAt: null } as any });
     return c.json({ product });
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Error" }, 500);
+    const { toAppError } = await import("../lib/errors.js");
+    const appErr = toAppError(e);
+    // Map partial-index P2002 to a clear 409
+    if (appErr.code === "CONFLICT") return c.json({ error: "Barcode already used by another active product", code: "BARCODE_TAKEN" }, 409);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 404 | 409 | 500 | 503);
   }
 });
 
