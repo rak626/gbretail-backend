@@ -17,6 +17,7 @@ import auth from "./routes/auth.js";
 import shops from "./routes/shops.js";
 import counters from "./routes/counters.js";
 import users from "./routes/users.js";
+import storefront from "./routes/storefront.js";
 
 export function createApp() {
   const app = new Hono();
@@ -118,6 +119,7 @@ export function createApp() {
 
   // Mount API — auth is public, shops/counters/users require auth internally
   app.route("/api/auth", auth);
+  app.route("/api/store", storefront);
   app.route("/api/shops", shops);
   app.route("/api/counters", counters);
   app.route("/api/users", users);

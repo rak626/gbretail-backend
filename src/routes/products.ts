@@ -213,7 +213,7 @@ products.post("/", async (c) => {
     if (!shopId && user.role !== "SUPER_ADMIN") return c.json({ error: "Shop not assigned" }, 403);
     if (user.role === "SUPER_ADMIN" && !shopId) return c.json({ error: "shopId required for SUPER_ADMIN" }, 400);
 
-    const { id, name, is_loose, rate_per_kg, barcode, price, costPrice, unit, category, preset_weights, preset_prices, stockQuantity, lowStockThreshold } = body as any;
+    const { id, name, is_loose, rate_per_kg, barcode, price, costPrice, unit, category, preset_weights, preset_prices, stockQuantity, lowStockThreshold, isOnline, onlinePrice, imageUrl } = body as any;
 
     if (!name || !category) {
       return c.json({ error: "name and category required" }, 400);
@@ -265,12 +265,21 @@ products.post("/", async (c) => {
       preset_prices: Array.isArray(preset_prices) ? (preset_prices as unknown[]).map((v) => parseMoney(v)).filter((n) => !isNaN(n)) : [],
       stockQuantity: stockQuantity != null ? Number(stockQuantity) : 100,
       lowStockThreshold: lowStockThreshold != null ? Number(lowStockThreshold) : 10,
+      // Online curation — same product line, online-specific price/visibility.
+      isOnline: isOnline != null ? Boolean(isOnline) : false,
+      onlinePrice: onlinePrice != null && String(onlinePrice).trim() !== "" ? parseMoney(onlinePrice) : null,
+      imageUrl: imageUrl ? String(imageUrl).trim().slice(0, 500) : null,
     };
 
     // validate stockQuantity
     if ((data.stockQuantity as number) < 0) return c.json({ error: "stockQuantity cannot be negative" }, 400);
     if (isNaN(data.lowStockThreshold as number) || (data.lowStockThreshold as number) < 0) return c.json({ error: "lowStockThreshold must be >= 0" }, 400);
     if (data.preset_weights && (data.preset_weights as number[]).some((n) => n <= 0)) return c.json({ error: "preset_weights must be positive" }, 400);
+    if (data.onlinePrice != null) {
+      const op = data.onlinePrice as number;
+      if (isNaN(op) || op < 0 || op > MAX_MONEY) return c.json({ error: "Invalid onlinePrice (max 2 decimals)" }, 400);
+    }
+    if (data.imageUrl && !/^https?:\/\/.{4,490}$/.test(String(data.imageUrl))) return c.json({ error: "Invalid imageUrl (http(s) URL)" }, 400);
 
     let product;
     if (id) {
@@ -345,6 +354,8 @@ products.post("/batch", async (c) => {
       const lt = r.lowStockThreshold != null ? Number(r.lowStockThreshold) : 10;
       if (isNaN(sq) || sq < 0) { errors.push({ index: i, error: "stockQuantity must be >=0" }); continue; }
       if (isNaN(lt) || lt < 0) { errors.push({ index: i, error: "lowStockThreshold must be >=0" }); continue; }
+      const img = r.imageUrl != null && String(r.imageUrl).trim() !== "" ? String(r.imageUrl).trim().slice(0, 500) : null;
+      if (img && !/^https?:\/\/.{4,490}$/.test(img)) { errors.push({ index: i, error: "invalid imageUrl (http(s) URL)" }); continue; }
       prepared.push({
         shopId,
         name, category,
@@ -358,6 +369,7 @@ products.post("/batch", async (c) => {
         preset_prices: Array.isArray(r.preset_prices) ? r.preset_prices.map((v: unknown) => pm(v)).filter((n: number) => !isNaN(n)) : [],
         stockQuantity: sq,
         lowStockThreshold: lt,
+        imageUrl: img,
       });
     }
     if (errors.length) return c.json({ error: "Batch validation failed", errors }, 400);
@@ -400,7 +412,7 @@ products.patch("/:id", async (c) => {
 
     const body = await c.req.json();
     const allowed: Record<string, unknown> = {};
-    const fields = ["name", "is_loose", "rate_per_kg", "barcode", "price", "costPrice", "unit", "category", "preset_weights", "preset_prices", "stockQuantity", "lowStockThreshold"] as const;
+    const fields = ["name", "is_loose", "rate_per_kg", "barcode", "price", "costPrice", "unit", "category", "preset_weights", "preset_prices", "stockQuantity", "lowStockThreshold", "isOnline", "onlinePrice", "imageUrl"] as const;
     for (const k of fields) if (k in body) allowed[k] = (body as Record<string, unknown>)[k];
 
     if (allowed.costPrice != null) {
@@ -430,6 +442,23 @@ products.patch("/:id", async (c) => {
     }
     if (allowed.name != null) allowed.name = String(allowed.name).trim();
     if (allowed.category != null) allowed.category = String(allowed.category);
+    if (allowed.isOnline != null) allowed.isOnline = Boolean(allowed.isOnline);
+    if (allowed.onlinePrice !== undefined) {
+      if (allowed.onlinePrice == null || String(allowed.onlinePrice).trim() === "") allowed.onlinePrice = null;
+      else {
+        const op = parseMoney(allowed.onlinePrice);
+        if (isNaN(op) || op < 0 || op > MAX_MONEY) return c.json({ error: "Invalid onlinePrice (max 2 decimals)" }, 400);
+        allowed.onlinePrice = op;
+      }
+    }
+    if (allowed.imageUrl !== undefined) {
+      if (!allowed.imageUrl) allowed.imageUrl = null;
+      else {
+        const u = String(allowed.imageUrl).trim().slice(0, 500);
+        if (!/^https?:\/\/.{4,490}$/.test(u)) return c.json({ error: "Invalid imageUrl (http(s) URL)" }, 400);
+        allowed.imageUrl = u;
+      }
+    }
     if (allowed.barcode != null) allowed.barcode = allowed.barcode ? String(allowed.barcode).trim() : null;
     if (allowed.unit != null) allowed.unit = String(allowed.unit);
     if (allowed.preset_weights != null) allowed.preset_weights = Array.isArray(allowed.preset_weights) ? (allowed.preset_weights as unknown[]).map(Number).filter((n) => !isNaN(n)) : [];

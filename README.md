@@ -1,5 +1,9 @@
 # gbretail-backend — Hono (Edge, Lightweight)
 
+Core system for GB Retail. Two frontends talk to it (same tables, same inventory):
+- `gbretail-pos` (local shop machine, staff billing) → authed `/api/*`
+- `gbretail-online` (customer storefront) → public `/api/store/*` (channel=online)
+
 Standalone backend extracted from `gbretail-pos`. Deploy edge-first, keep running without VM babysitting.
 
 ## Stack
@@ -56,8 +60,10 @@ All routes under `/api`:
 - `GET  /api/analytics/*` — sales, profit, staff, stock
 - `GET  /api/products?search&category&limit&page&stock&sortBy&sortOrder` + `POST /api/products` + `GET/PATCH/DELETE /api/products/:id` (+ `POST /:id/restore`; barcode unique per shop)
 - `GET  /api/customers?q&limit` + `POST /api/customers` + `GET/PATCH /api/customers/:id`
-- `GET  /api/orders?page&limit&customerId&paymentMethod&search&date` + `POST /api/orders` + `GET /api/orders/:id` + `GET /api/orders/next-number` (preview only)
+- `GET  /api/orders?page&limit&customerId&paymentMethod&search&date` + `POST /api/orders` + `GET /api/orders/:id` + `GET /api/orders/next-number` (preview only) + `PATCH /api/orders/:id/status` (online flow: pending→confirmed→packed→out_for_delivery→delivered|cancelled; `?channel=pos|online&fulfilment&status` filters)
 - `GET  /api/ledger?filter&q&customerId&page&limit&due` + `GET /api/ledger/due-today?q&includeOverdue` + `POST /api/ledger` + `GET/PATCH/DELETE /api/ledger/:id`
+- `GET  /api/store/cities` + `GET /api/store/shops?city` + `GET /api/store/shops/:id` + `GET /api/store/shops/:id/products` (public, online-only catalog, no costPrice)
+- `POST /api/store/register|login|logout` + `GET /api/store/me` (customer auth on shared Customer row — POS sees online customers by phone) + `POST /api/store/orders` (channel=online, COD, shared stock) + `GET /api/store/orders/mine`
 
 SUPER_ADMIN shop scoping: `x-shop-id` header (merged in requireAuth) or `?shopId=` query.
 

@@ -34,6 +34,11 @@ function receiptFields(body: Record<string, unknown>, partial = false): Record<s
     if (body.phone != null && String(body.phone).trim() !== "" && (!p || !/^\d{10}$/.test(p))) return "Invalid shop phone (10 digits)";
     out.phone = p;
   }
+  if (!partial || body.email !== undefined) {
+    const e = body.email != null && String(body.email).trim() !== "" ? String(body.email).trim().toLowerCase().slice(0, 320) : null;
+    if (e && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) return "Invalid shop email";
+    out.email = e;
+  }
   if (!partial || body.receiptFooter !== undefined) out.receiptFooter = str(body.receiptFooter, 200);
   return out;
 }
@@ -103,11 +108,12 @@ shops.post("/", requireRole("SUPER_ADMIN") as any, async (c) => {
     const body = await c.req.json();
     const name = String(body.name ?? "").trim();
     const address = body.address ? String(body.address).trim().slice(0, 500) : null;
+    const city = body.city ? String(body.city).trim().slice(0, 100) : null;
     if (!name) return c.json({ error: "Shop name required" }, 400);
     if (name.length > 100) return c.json({ error: "Name too long" }, 400);
     const receipt = receiptFields(body);
     if (typeof receipt === "string") return c.json({ error: receipt }, 400);
-    const shop = await prisma.shop.create({ data: { name, address, code: await allocateShopCode(), ...receipt } });
+    const shop = await prisma.shop.create({ data: { name, address, city, code: await allocateShopCode(), ...receipt } });
     await prisma.shopOrderSeq.upsert({ where: { shopId: shop.id }, update: {}, create: { shopId: shop.id, lastNo: 0 } });
     return c.json({ shop }, 201);
   } catch (e) {
@@ -133,6 +139,47 @@ shops.patch("/:id", async (c) => {
       data.name = n;
     }
     if (body.address !== undefined) data.address = body.address ? String(body.address).trim().slice(0, 500) : null;
+    if (body.city !== undefined) data.city = body.city ? String(body.city).trim().slice(0, 100) : null;
+    // Online storefront config — SUPER_ADMIN only (owner edits go through same guard as isActive).
+    if (body.isOnlineEnabled !== undefined || body.pickupEnabled !== undefined || body.deliveryEnabled !== undefined || body.codEnabled !== undefined || body.deliveryFee !== undefined || body.freeDeliveryAbove !== undefined || body.minOrderAmount !== undefined || body.onlineNote !== undefined || body.avgPrepMinutes !== undefined) {
+      if (user.role !== "SUPER_ADMIN") {
+        return c.json({ error: "Forbidden — only admin can change online config", code: "FORBIDDEN" }, 403);
+      }
+      if (body.isOnlineEnabled !== undefined) data.isOnlineEnabled = Boolean(body.isOnlineEnabled);
+      if (body.pickupEnabled !== undefined) data.pickupEnabled = Boolean(body.pickupEnabled);
+      if (body.deliveryEnabled !== undefined) data.deliveryEnabled = Boolean(body.deliveryEnabled);
+      if (body.codEnabled !== undefined) data.codEnabled = Boolean(body.codEnabled);
+      if (body.deliveryFee !== undefined) {
+        const { parseMoney: pmFee } = await import("../lib/money.js");
+        const fee = pmFee(body.deliveryFee);
+        if (isNaN(fee) || fee < 0) return c.json({ error: "Invalid deliveryFee" }, 400);
+        data.deliveryFee = fee;
+      }
+      if (body.freeDeliveryAbove !== undefined) {
+        if (body.freeDeliveryAbove == null || String(body.freeDeliveryAbove).trim() === "") data.freeDeliveryAbove = null;
+        else {
+          const { parseMoney: pmFree } = await import("../lib/money.js");
+          const v = pmFree(body.freeDeliveryAbove);
+          if (isNaN(v) || v < 0) return c.json({ error: "Invalid freeDeliveryAbove" }, 400);
+          data.freeDeliveryAbove = v;
+        }
+      }
+      if (body.minOrderAmount !== undefined) {
+        const { parseMoney: pmMin } = await import("../lib/money.js");
+        const v = pmMin(body.minOrderAmount);
+        if (isNaN(v) || v < 0) return c.json({ error: "Invalid minOrderAmount" }, 400);
+        data.minOrderAmount = v;
+      }
+      if (body.onlineNote !== undefined) data.onlineNote = body.onlineNote ? String(body.onlineNote).trim().slice(0, 500) : null;
+      if (body.avgPrepMinutes !== undefined) {
+        if (body.avgPrepMinutes == null || String(body.avgPrepMinutes).trim() === "") data.avgPrepMinutes = null;
+        else {
+          const v = Number(body.avgPrepMinutes);
+          if (!Number.isInteger(v) || v < 0 || v > 1440) return c.json({ error: "Invalid avgPrepMinutes (0–1440)" }, 400);
+          data.avgPrepMinutes = v;
+        }
+      }
+    }
     if (body.isActive !== undefined) {
       // Prevent self-lockout: SHOP_OWNER cannot deactivate their own shop.
       // Only SUPER_ADMIN can toggle isActive (staff/owner get 403 SHOP_DISABLED otherwise).

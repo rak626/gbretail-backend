@@ -31,7 +31,7 @@ export async function closeTestPrisma(): Promise<void> {
 export async function truncateAll(): Promise<void> {
   const p = testPrisma();
   await p.$executeRawUnsafe(
-    `TRUNCATE "Session","LedgerEntry","OrderItem","Order","Customer","Product","ShopOrderSeq","Counter","User","Shop" RESTART IDENTITY CASCADE`
+    `TRUNCATE "Session","LedgerEntry","OrderItem","Order","Customer","OnlineUser","Product","ShopOrderSeq","Counter","User","Shop" RESTART IDENTITY CASCADE`
   );
 }
 

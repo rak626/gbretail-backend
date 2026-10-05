@@ -64,6 +64,7 @@ orders.get("/next-number", async (c) => {
 // GET /api/orders?page&limit&customerId&paymentMethod&search&customer&date&from&to
 // search = order number (kept backward-compat), customer = customer name/phone,
 // date = single day (legacy), from/to = YYYY-MM-DD range (preferred)
+// channel = pos|online, fulfilment = pickup|delivery, status = pending|confirmed|...
 // Pagination: legacy ?page&limit (deprecated) OR cursor ?cursor&limit → { nextCursor }.
 orders.get("/", async (c) => {
   const { parseLimit, decodeCursor, encodeCursor, cursorWhere } = await import("../lib/pagination.js");
@@ -73,6 +74,9 @@ orders.get("/", async (c) => {
   const cursorParam = c.req.query("cursor") ?? null;
   const customerId = c.req.query("customerId");
   const paymentMethod = (c.req.query("paymentMethod") ?? "").trim();
+  const channel = (c.req.query("channel") ?? "").trim().toLowerCase();
+  const fulfilment = (c.req.query("fulfilment") ?? "").trim().toLowerCase();
+  const statusQ = (c.req.query("status") ?? "").trim().toLowerCase();
   const search = (c.req.query("search") ?? "").trim();
   const customerQ = (c.req.query("customer") ?? "").trim();
   const date = c.req.query("date");
@@ -88,6 +92,11 @@ orders.get("/", async (c) => {
     if (customerId) where.customerId = customerId;
     if (paymentMethod && ["cash", "upi", "khata", "split"].includes(paymentMethod.toLowerCase())) {
       where.paymentMethod = paymentMethod.toLowerCase();
+    }
+    if (channel && ["pos", "online"].includes(channel)) where.channel = channel;
+    if (fulfilment && ["pickup", "delivery"].includes(fulfilment)) where.fulfilment = fulfilment;
+    if (statusQ && ["pending", "confirmed", "packed", "out_for_delivery", "delivered", "cancelled", "completed"].includes(statusQ)) {
+      where.status = statusQ;
     }
     if (search) where.orderNumber = { contains: search, mode: "insensitive" as const };
     if (customerQ) {
@@ -574,6 +583,172 @@ orders.post("/", async (c) => {
     console.error("[POST /orders]", e);
     const appErr = toAppError(e);
     return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 404 | 409 | 422 | 500 | 503);
+  }
+});
+
+// PATCH /api/orders/:id/status — staff progresses online orders.
+// pending→confirmed|cancelled, confirmed→packed|cancelled,
+// packed→out_for_delivery|delivered, out_for_delivery→delivered.
+// Cancelling restores stock + reverses customer aggregates. POS (completed) rows reject.
+orders.patch("/:id/status", async (c) => {
+  const id = c.req.param("id");
+  const { user, shopId } = getShopScope(c);
+  try {
+    const body = await c.req.json();
+    const next = String(body.status ?? "").trim().toLowerCase();
+    const allowedNext = ["confirmed", "packed", "out_for_delivery", "delivered", "cancelled"];
+    if (!allowedNext.includes(next)) return c.json({ error: "Invalid status (confirmed|packed|out_for_delivery|delivered|cancelled)" }, 400);
+    const existing: any = await prisma.order.findUnique({ where: { id }, include: { items: true } });
+    if (!existing || existing.deletedAt) return c.json({ error: "Order not found" }, 404);
+    if (shopId && existing.shopId && existing.shopId !== shopId && user.role !== "SUPER_ADMIN") return c.json({ error: "Forbidden" }, 403);
+    if (existing.channel !== "online") return c.json({ error: "Only online orders use status flow", code: "NOT_ONLINE" }, 400);
+    const cur = String(existing.status);
+    const transitions: Record<string, string[]> = {
+      pending: ["confirmed", "cancelled"],
+      confirmed: ["packed", "cancelled"],
+      packed: ["out_for_delivery", "delivered"],
+      out_for_delivery: ["delivered"],
+    };
+    if (!(transitions[cur] ?? []).includes(next)) {
+      return c.json({ error: `Cannot move ${cur} → ${next}`, code: "BAD_TRANSITION" }, 409);
+    }
+    if (next === "cancelled") {
+      const total = Number(existing.total ?? 0);
+      await prisma.$transaction(async (tx: any) => {
+        await tx.order.update({ where: { id }, data: { status: "cancelled" } });
+        for (const it of existing.items ?? []) {
+          if (!it.isCustom && it.productId) {
+            const qty = Number(it.quantity ?? it.weight ?? 0);
+            if (qty > 0) await tx.product.updateMany({ where: { id: String(it.productId) }, data: { stockQuantity: { increment: qty } } });
+          }
+        }
+        if (existing.customerId) {
+          await tx.customer.updateMany({ where: { id: existing.customerId }, data: { totalSpent: { decrement: total }, totalOrders: { decrement: 1 } } });
+        }
+      });
+    } else {
+      await prisma.order.update({ where: { id }, data: { status: next as any } });
+    }
+    const updated = await prisma.order.findUnique({ where: { id }, include: { items: true, customer: true } });
+    try {
+      const { invalidateAnalyticsCache } = await import("./analytics.js");
+      invalidateAnalyticsCache();
+    } catch { /* best-effort */ }
+    return c.json({ order: updated });
+  } catch (e) {
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 404 | 409 | 500 | 503);
+  }
+});
+
+// POST /api/orders/:id/settle — counter collects payment for an online pickup order.
+// Same order row transitions pending|confirmed|packed → delivered with payment +
+// counter attribution. Strict rules so a pickup can never become a second sale:
+// - NO stock movement (already decremented at online creation)
+// - NO customer aggregate changes (already booked at online creation)
+// - Totals are frozen from the order row (online price snapshot); never recalculated
+// - Conditional single transition: concurrent settles / mid-settle cancels get 409
+orders.post("/:id/settle", async (c) => {
+  const id = c.req.param("id");
+  const { user, shopId } = getShopScope(c);
+  try {
+    const body = await c.req.json();
+    let { paymentMethod, counterId, splitCash, splitUpi } = body as Record<string, unknown>;
+    if (!paymentMethod || !["cash", "upi", "split"].includes(String(paymentMethod))) {
+      if (String(paymentMethod) === "khata") {
+        return c.json({ error: "Khata not allowed on pickup collection — cash/UPI only", code: "KHATA_NOT_ALLOWED" }, 400);
+      }
+      return c.json({ error: "Invalid paymentMethod (cash|upi|split)" }, 400);
+    }
+    paymentMethod = String(paymentMethod);
+    const tenderSent = splitCash != null || splitUpi != null;
+    if (paymentMethod !== "split" && tenderSent) {
+      return c.json({ error: "splitCash/splitUpi only allowed with paymentMethod 'split'" }, 400);
+    }
+
+    const existing: any = await prisma.order.findUnique({ where: { id }, include: { items: true, customer: true } });
+    if (!existing || existing.deletedAt) return c.json({ error: "Order not found" }, 404);
+    if (shopId && existing.shopId && existing.shopId !== shopId && user.role !== "SUPER_ADMIN") {
+      return c.json({ error: "Forbidden" }, 403);
+    }
+    if (existing.channel !== "online") {
+      return c.json({ error: "Only online pickup orders can be settled at the counter", code: "NOT_ONLINE" }, 400);
+    }
+    const cur = String(existing.status);
+    if (!["pending", "confirmed", "packed"].includes(cur)) {
+      return c.json(
+        { error: `Order is ${cur} — only pending/confirmed/packed pickup orders can be settled`, code: "NOT_SETTLABLE", order: existing },
+        409
+      );
+    }
+    const total = round2(Number(existing.total ?? 0));
+
+    // Counter attribution: STAFF pinned to assigned counter (client value ignored);
+    // owner/super may pass one, else first active counter of the shop.
+    if (user.role === "STAFF") {
+      if (!shopId && !existing.shopId) return c.json({ error: "Shop not assigned" }, 403);
+      const sc = await resolveStaffCounter(user.userId, (shopId ?? existing.shopId) as string);
+      if (!sc) return c.json({ error: "No counter assigned — contact owner" }, 403);
+      counterId = (sc as any).id;
+    } else if (counterId) {
+      const counter = await prisma.counter.findUnique({ where: { id: String(counterId) } });
+      if (!counter || (counter as any).deletedAt || !(counter as any).isActive) {
+        return c.json({ error: "Counter not found or inactive" }, 404);
+      }
+      if ((counter as any).shopId !== existing.shopId) return c.json({ error: "Counter does not belong to shop" }, 403);
+    } else {
+      const firstCounter = await prisma.counter.findFirst({
+        where: { shopId: existing.shopId, deletedAt: null, isActive: true },
+      });
+      if (firstCounter) counterId = (firstCounter as any).id;
+    }
+
+    // Split tender must cover the frozen order total exactly, to the paise.
+    let tenderCash: number | null = null;
+    let tenderUpi: number | null = null;
+    if (paymentMethod === "split") {
+      tenderCash = parseMoney(splitCash);
+      tenderUpi = parseMoney(splitUpi);
+      if (isNaN(tenderCash) || tenderCash <= 0 || tenderCash > MAX_MONEY) {
+        return c.json({ error: "splitCash required (>0, max 2 decimals)" }, 400);
+      }
+      if (isNaN(tenderUpi) || tenderUpi <= 0 || tenderUpi > MAX_MONEY) {
+        return c.json({ error: "splitUpi required (>0, max 2 decimals)" }, 400);
+      }
+      if (Math.round(round2(tenderCash + tenderUpi) * 100) !== Math.round(total * 100)) {
+        return c.json({ error: `splitCash + splitUpi must equal order total ${total.toFixed(2)}` }, 400);
+      }
+    }
+
+    // Conditional transition — concurrent settle or mid-settle cancel loses here.
+    const upd = await prisma.order.updateMany({
+      where: { id, deletedAt: null, status: { in: ["pending", "confirmed", "packed"] } },
+      data: {
+        status: "delivered",
+        paymentMethod: paymentMethod as any,
+        ...(paymentMethod === "split"
+          ? { cashAmount: tenderCash, upiAmount: tenderUpi }
+          : { cashAmount: null, upiAmount: null }),
+        ...(counterId ? { counterId: String(counterId) } : {}),
+        ...(user?.userId ? { userId: String(user.userId) } : {}),
+      },
+    });
+    if (upd.count === 0) {
+      const fresh = await prisma.order.findUnique({ where: { id }, include: { items: true, customer: true } });
+      return c.json(
+        { error: `Order changed while settling (now ${(fresh as any)?.status}) — reloaded`, code: "SETTLE_CONFLICT", order: fresh },
+        409
+      );
+    }
+    const updated = await prisma.order.findUnique({ where: { id }, include: { items: true, customer: true } });
+    try {
+      const { invalidateAnalyticsCache } = await import("./analytics.js");
+      invalidateAnalyticsCache();
+    } catch { /* best-effort */ }
+    return c.json({ order: updated });
+  } catch (e) {
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 404 | 409 | 500 | 503);
   }
 });
 

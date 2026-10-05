@@ -62,6 +62,8 @@ model Shop {
   freeDeliveryAbove Decimal? @db.Decimal(12, 2)
   minOrderAmount   Decimal @default(0) @db.Decimal(12, 2)
   onlineNote       String?
+  // Merchant-set average order preparation time in minutes (pickup storefront display).
+  avgPrepMinutes Int?
   isActive  Boolean   @default(true)
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -71,6 +73,7 @@ model Shop {
   gstin         String?
   upiId         String?
   phone         String?
+  email         String?
   receiptFooter String?
   counters      Counter[]
   users         User[]
@@ -230,6 +233,22 @@ model Customer {
   @@index([deletedAt])
 }
 
+// Global online-storefront account — NOT attached to any shop (one person,
+// every store). Per-shop POS history lives on Customer rows, linked by phone
+// at order time. Fresh start: legacy per-shop online logins were retired;
+// Customer.passwordHash is POS-unused and stays NULL for new rows.
+model OnlineUser {
+  id           String   @id @default(cuid())
+  name         String
+  phone        String   @unique
+  email        String   @unique
+  passwordHash String
+  address      String?
+  orders       Order[]
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
 model Order {
   id            String        @id @default(cuid())
   orderNumber   String        @unique
@@ -249,6 +268,9 @@ model Order {
   upiAmount     Decimal?      @db.Decimal(12, 2)
   customerId    String?
   customer      Customer?     @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  // Global online account that placed the order (null = counter sale or legacy).
+  onlineUserId  String?
+  onlineUser    OnlineUser?   @relation(fields: [onlineUserId], references: [id], onDelete: SetNull)
   status        OrderStatus   @default(completed)
   // Channel: pos = local shop machine frontend, online = customer storefront.
   // POS bills stay completed; online orders flow pending→confirmed→packed→delivered.
@@ -277,6 +299,7 @@ model Order {
   @@index([shopId, channel, status])
   @@index([shopId, customerId, createdAt])
   @@index([customerId])
+  @@index([onlineUserId])
   @@index([createdAt])
   @@index([paymentMethod])
   @@index([deletedAt])

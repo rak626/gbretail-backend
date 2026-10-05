@@ -53,10 +53,16 @@ async function main() {
 
   const defaultShop = await prisma.shop.upsert({
     where: { id: "shop_default" },
-    update: { code: "GB-SHOP-1001", name: "Main Shop", isActive: true, deletedAt: null },
-    create: { id: "shop_default", code: "GB-SHOP-1001", name: "Main Shop", address: "Main Bazaar", isActive: true },
+    update: { code: "GB-SHOP-1001", name: "Main Shop", city: "Local", isOnlineEnabled: true, isActive: true, deletedAt: null },
+    create: { id: "shop_default", code: "GB-SHOP-1001", name: "Main Shop", address: "Main Bazaar", city: "Local", isOnlineEnabled: true, isActive: true, avgPrepMinutes: 20 },
   });
   console.log(`[SEED] Shop: ${defaultShop.id} — ${defaultShop.name}`);
+
+  // Default prep-time display for the pickup storefront (only when never set).
+  await prisma.shop.updateMany({
+    where: { id: defaultShop.id, avgPrepMinutes: null },
+    data: { avgPrepMinutes: 20 },
+  });
 
   await prisma.shop.updateMany({
     where: { id: defaultShop.id, receiptName: null },
@@ -97,11 +103,16 @@ async function main() {
 
   console.log("[SEED] Seeding products...");
 
+  let onlineCount = 0;
   for (const p of products) {
     const sell = (p as any).price ?? (p as any).rate_per_kg ?? 0;
     const cost = sell ? Math.round(sell * 0.78 * 100) / 100 : 0;
     const unit = (p as any).unit ?? "pcs";
     const lowStockThreshold = (p as any).lowStockThreshold ?? 10;
+    // Demo curation: first 12 products online with ~10% online markup.
+    const makeOnline = onlineCount < 12 && sell > 0;
+    const onlinePrice = makeOnline ? Math.round(sell * 1.1 * 100) / 100 : null;
+    if (makeOnline) onlineCount++;
     await prisma.product.upsert({
       where: { id: p.id },
       update: {
@@ -118,6 +129,8 @@ async function main() {
         preset_weights: (p as any).preset_weights ?? [],
         preset_prices: (p as any).preset_prices ?? [],
         deletedAt: null,
+        isOnline: makeOnline,
+        onlinePrice,
       },
       create: {
         id: p.id,
@@ -134,6 +147,8 @@ async function main() {
         preset_weights: (p as any).preset_weights ?? [],
         preset_prices: (p as any).preset_prices ?? [],
         stockQuantity: 100,
+        isOnline: makeOnline,
+        onlinePrice,
       },
     });
   }
