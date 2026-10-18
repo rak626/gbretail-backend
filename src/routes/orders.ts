@@ -619,6 +619,45 @@ orders.post("/", async (c) => {
         }
       }
 
+      // Legacy backward compat: deduct from Product stock for items with productId only
+      const legacyBatchDecrements = new Map<string, number>();
+      const decrementedLegacyIds: string[] = [];
+      for (const it of items as Record<string, unknown>[]) {
+        if (!it.isCustom && it.productId && !it.shopProductId) {
+          const pid = String(it.productId);
+          const qty = Number(it.quantity ?? it.weight ?? 1);
+          if (qty <= 0) continue;
+          decrementedLegacyIds.push(pid);
+          const res = await tx.product.updateMany({
+            where: { id: pid, stockQuantity: { gte: qty } },
+            data: { stockQuantity: { decrement: qty } },
+          });
+          if ((res as any).count === 0) {
+            const fresh = await tx.product.findUnique({ where: { id: pid }, select: { stockQuantity: true, name: true } });
+            throw new AppError(409, `Insufficient stock for ${fresh?.name ?? (it as any).name}. Available: ${dec((fresh as any)?.stockQuantity) ?? 0}, requested: ${qty}`);
+          }
+        }
+      }
+      // Apply legacy ProductBatch-level decrements
+      for (const it of items as Record<string, unknown>[]) {
+        if (!it.isCustom && it.productId && !it.shopProductId && it.batchId) {
+          const qty = Number(it.quantity ?? it.weight ?? 1);
+          if (qty <= 0) continue;
+          const bid = String(it.batchId);
+          const current = legacyBatchDecrements.get(bid) ?? 0;
+          legacyBatchDecrements.set(bid, current + qty);
+        }
+      }
+      for (const [batchId, totalQty] of legacyBatchDecrements) {
+        const res = await tx.productBatch.updateMany({
+          where: { id: batchId, quantity: { gte: totalQty } },
+          data: { quantity: { decrement: totalQty } },
+        });
+        if ((res as any).count === 0) {
+          throw new AppError(409, `Insufficient batch stock for batch ${batchId}`);
+        }
+      }
+
       // Low stock warnings (ShopProduct-level)
       const uniqueDecrementedIds = [...new Set(decrementedShopProductIds)];
       if (uniqueDecrementedIds.length) {
@@ -634,6 +673,26 @@ orders.post("/", async (c) => {
               stockQuantity: dec((after as any).stockQuantity),
               lowStockThreshold: dec((after as any).lowStockThreshold ?? 10),
               unit: (after as any).masterProduct?.unit ?? "pcs",
+            });
+          }
+        }
+      }
+
+      // Low stock warnings (legacy Product-level)
+      const uniqueLegacyIds = [...new Set(decrementedLegacyIds)];
+      if (uniqueLegacyIds.length) {
+        const legacyAfters = await tx.product.findMany({
+          where: { id: { in: uniqueLegacyIds } },
+          select: { id: true, stockQuantity: true, name: true, lowStockThreshold: true, unit: true },
+        });
+        for (const after of legacyAfters) {
+          if (dec((after as any).stockQuantity) <= dec((after as any).lowStockThreshold ?? 10)) {
+            lowStockWarnings.push({
+              productId: (after as any).id,
+              name: (after as any).name,
+              stockQuantity: dec((after as any).stockQuantity),
+              lowStockThreshold: dec((after as any).lowStockThreshold ?? 10),
+              unit: (after as any).unit ?? "pcs",
             });
           }
         }
