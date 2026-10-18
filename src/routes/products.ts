@@ -2,8 +2,9 @@ import { Hono } from "hono";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../lib/prisma.js";
 import { getShopScope } from "../lib/shopScope.js";
-import { requireAuth } from "../middleware/auth.js";
+import { requireAuth, requireRole } from "../middleware/auth.js";
 import { parseMoney, MAX_MONEY } from "../lib/money.js";
+import { validateBatchInput, parseExpiry } from "../lib/validators.js";
 
 const products = new Hono();
 
@@ -176,9 +177,29 @@ products.get("/meta", async (c) => {
     });
     const agg = rows[0] ?? { total: 0, low: 0, out: 0, valuecost: 0, valuesell: 0 };
     const hideCost = await staffInventoryDenied(c);
-    return c.json({ total: agg.total, low: agg.low, out: agg.out, stockValueCost: hideCost ? 0 : (agg.valuecost ?? 0), stockValueSell: agg.valuesell ?? 0, categories: cats.map((r) => r.category) });
+
+    // Expiry alerts: batches expiring within 7 days, or already past expiry with stock remaining
+    const now = new Date();
+    const in7Days = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    const expConds: Prisma.Sql[] = [Prisma.sql`"deletedAt" IS NULL`, Prisma.sql`"quantity" > 0`];
+    if (shopId) expConds.push(Prisma.sql`"shopId" = ${shopId}`);
+    const expiryRows = await prisma.$queryRaw<Array<{ expiringSoon: number; expired: number }>>(
+      Prisma.sql`SELECT COUNT(*) FILTER (WHERE "expiryDate" IS NOT NULL AND "expiryDate" <= ${in7Days} AND "expiryDate" >= ${now})::int AS expiringSoon, COUNT(*) FILTER (WHERE "expiryDate" IS NOT NULL AND "expiryDate" < ${now})::int AS expired FROM "ProductBatch" WHERE ${Prisma.join(expConds, " AND ")}`
+    );
+    const expiryAgg = expiryRows[0] ?? { expiringSoon: 0, expired: 0 };
+
+    return c.json({
+      total: agg.total,
+      low: agg.low,
+      out: agg.out,
+      stockValueCost: hideCost ? 0 : (agg.valuecost ?? 0),
+      stockValueSell: agg.valuesell ?? 0,
+      categories: cats.map((r) => r.category),
+      expiringSoon: (expiryAgg as any).expiringSoon ?? 0,
+      expired: (expiryAgg as any).expired ?? 0,
+    });
   } catch (e) {
-    return c.json({ error: "Failed to load product stats", total: 0, low: 0, out: 0, stockValueCost: 0, stockValueSell: 0, categories: [] }, 500);
+    return c.json({ error: "Failed to load product stats", total: 0, low: 0, out: 0, stockValueCost: 0, stockValueSell: 0, categories: [], expiringSoon: 0, expired: 0 }, 500);
   }
 });
 
@@ -532,8 +553,184 @@ products.post("/:id/restore", async (c) => {
   } catch (e) {
     const { toAppError } = await import("../lib/errors.js");
     const appErr = toAppError(e);
-    // Map partial-index P2002 to a clear 409
     if (appErr.code === "CONFLICT") return c.json({ error: "Barcode already used by another active product", code: "BARCODE_TAKEN" }, 409);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 404 | 409 | 500 | 503);
+  }
+});
+
+// ============================================================================
+// Product Batches — expiry / MRP / cost tracking per received lot
+// ============================================================================
+
+// GET /api/products/batches?productId=&shopId=&activeOnly=1
+products.get("/batches", async (c) => {
+  const user = (c as any).get("user") as any;
+  const { shopId } = getShopScope(c);
+  const productId = c.req.query("productId");
+  const activeOnly = c.req.query("activeOnly") !== "0";
+  try {
+    if (!shopId && user.role !== "SUPER_ADMIN") return c.json({ error: "Shop not assigned" }, 403);
+    const where: Record<string, unknown> = {};
+    if (shopId) where.shopId = shopId;
+    if (productId) where.productId = productId;
+    if (activeOnly) where.deletedAt = null;
+    const batches = await prisma.productBatch.findMany({
+      where,
+      include: { product: { select: { id: true, name: true, is_loose: true, rate_per_kg: true, price: true, unit: true } } },
+      orderBy: [{ expiryDate: "asc" }, { createdAt: "desc" }],
+    });
+    return c.json({ batches });
+  } catch (e) {
+    const { toAppError } = await import("../lib/errors.js");
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 404 | 409 | 500 | 503);
+  }
+});
+
+// POST /api/products/batches — receive stock into a new batch
+products.post("/batches", async (c) => {
+  if (await staffInventoryDenied(c)) return c.json({ error: "Forbidden — inventory access not granted by owner" }, 403);
+  const user = (c as any).get("user") as any;
+  const { shopId } = getShopScope(c);
+  try {
+    if (!shopId && user.role !== "SUPER_ADMIN") return c.json({ error: "Shop not assigned" }, 403);
+    if (user.role === "SUPER_ADMIN" && !shopId) return c.json({ error: "shopId required for SUPER_ADMIN" }, 400);
+
+    const body = await c.req.json();
+    const productId = String(body.productId ?? "");
+    const { batchNo, expiryDate, mrp, costPrice, quantity } = validateBatchInput(body as Record<string, unknown>);
+
+    // Verify product exists and belongs to shop
+    const product = await prisma.product.findUnique({ where: { id: productId } });
+    if (!product || product.deletedAt) return c.json({ error: "Product not found" }, 404);
+    if (product.shopId !== shopId && user.role !== "SUPER_ADMIN") return c.json({ error: "Forbidden — product belongs to another shop" }, 403);
+
+    const expiry = parseExpiry(expiryDate);
+
+    const batch = await prisma.$transaction(async (tx) => {
+      const created = await tx.productBatch.create({
+        data: {
+          productId,
+          shopId: shopId!,
+          batchNo,
+          expiryDate: expiry ?? undefined,
+          mrp: mrp ?? undefined,
+          costPrice,
+          quantity,
+          receivedAt: new Date(),
+        },
+      });
+      // Increment product stockQuantity
+      await tx.product.update({
+        where: { id: productId },
+        data: { stockQuantity: { increment: quantity } },
+      });
+      return created;
+    });
+
+    try {
+      const { invalidateAnalyticsCache } = await import("./analytics.js");
+      invalidateAnalyticsCache();
+    } catch { /* best-effort */ }
+    return c.json({ batch }, 201);
+  } catch (e) {
+    const { toAppError } = await import("../lib/errors.js");
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 404 | 409 | 500 | 503);
+  }
+});
+
+// PATCH /api/products/batches/:id — update batch fields
+products.patch("/batches/:id", async (c) => {
+  if (await staffInventoryDenied(c)) return c.json({ error: "Forbidden — inventory access not granted by owner" }, 403);
+  const user = (c as any).get("user") as any;
+  const { shopId } = getShopScope(c);
+  const id = c.req.param("id");
+  try {
+    const existing = await prisma.productBatch.findUnique({ where: { id } });
+    if (!existing || existing.deletedAt) return c.json({ error: "Batch not found" }, 404);
+    if (existing.shopId !== shopId && user.role !== "SUPER_ADMIN") return c.json({ error: "Forbidden" }, 403);
+
+    const body = await c.req.json();
+    const data: Record<string, unknown> = {};
+    if (body.batchNo !== undefined) {
+      const bn = String(body.batchNo).trim();
+      if (!bn) return c.json({ error: "batchNo required" }, 400);
+      data.batchNo = bn;
+    }
+    if (body.expiryDate !== undefined) {
+      const exp = parseExpiry(body.expiryDate);
+      data.expiryDate = exp ?? null;
+    }
+    if (body.mrp !== undefined) {
+      if (body.mrp == null || String(body.mrp).trim() === "") data.mrp = null;
+      else {
+        const v = parseMoney(body.mrp);
+        if (isNaN(v) || v < 0) return c.json({ error: "Invalid mrp" }, 400);
+        data.mrp = v;
+      }
+    }
+    if (body.costPrice !== undefined) {
+      const cp = parseMoney(body.costPrice);
+      if (isNaN(cp) || cp < 0) return c.json({ error: "Invalid costPrice" }, 400);
+      data.costPrice = cp;
+    }
+    if (body.quantity !== undefined) {
+      const q = Number(body.quantity);
+      if (isNaN(q) || q < 0) return c.json({ error: "quantity must be >=0" }, 400);
+      data.quantity = q;
+    }
+    if (Object.keys(data).length === 0) return c.json({ error: "No valid fields" }, 400);
+
+    const batch = await prisma.productBatch.update({ where: { id }, data });
+    return c.json({ batch });
+  } catch (e) {
+    const { toAppError } = await import("../lib/errors.js");
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 404 | 409 | 500 | 503);
+  }
+});
+
+// DELETE /api/products/batches/:id — soft delete (only if no transfer items reference it)
+products.delete("/batches/:id", async (c) => {
+  if (await staffInventoryDenied(c)) return c.json({ error: "Forbidden — inventory access not granted by owner" }, 403);
+  const user = (c as any).get("user") as any;
+  const { shopId } = getShopScope(c);
+  const id = c.req.param("id");
+  try {
+    const existing = await prisma.productBatch.findUnique({ where: { id } });
+    if (!existing || existing.deletedAt) return c.json({ error: "Batch not found" }, 404);
+    if (existing.shopId !== shopId && user.role !== "SUPER_ADMIN") return c.json({ error: "Forbidden" }, 403);
+
+    // Block if referenced by any stock transfer item
+    const refs = await prisma.stockTransferItem.findFirst({ where: { batchId: id } });
+    if (refs) return c.json({ error: "Batch is referenced by a stock transfer — cannot delete", code: "BATCH_REFERENCED" }, 409);
+
+    const batch = await prisma.productBatch.update({ where: { id }, data: { deletedAt: new Date() } });
+    return c.json({ success: true, softDeleted: true, batch });
+  } catch (e) {
+    const { toAppError } = await import("../lib/errors.js");
+    const appErr = toAppError(e);
+    return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 404 | 409 | 500 | 503);
+  }
+});
+
+// POST /api/products/batches/:id/restore
+products.post("/batches/:id/restore", async (c) => {
+  if (await staffInventoryDenied(c)) return c.json({ error: "Forbidden — inventory access not granted by owner" }, 403);
+  const user = (c as any).get("user") as any;
+  const { shopId } = getShopScope(c);
+  const id = c.req.param("id");
+  try {
+    const existing = await prisma.productBatch.findUnique({ where: { id } });
+    if (!existing) return c.json({ error: "Not found" }, 404);
+    if (!existing.deletedAt) return c.json({ batch: existing, message: "Already active" });
+    if (existing.shopId !== shopId && user.role !== "SUPER_ADMIN") return c.json({ error: "Forbidden" }, 403);
+    const batch = await prisma.productBatch.update({ where: { id }, data: { deletedAt: null } });
+    return c.json({ batch });
+  } catch (e) {
+    const { toAppError } = await import("../lib/errors.js");
+    const appErr = toAppError(e);
     return c.json({ error: appErr.message, code: appErr.code }, appErr.status as 400 | 404 | 409 | 500 | 503);
   }
 });

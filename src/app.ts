@@ -18,6 +18,7 @@ import shops from "./routes/shops.js";
 import counters from "./routes/counters.js";
 import users from "./routes/users.js";
 import storefront from "./routes/storefront.js";
+import transfers from "./routes/transfers.js";
 
 export function createApp() {
   const app = new Hono();
@@ -130,6 +131,7 @@ export function createApp() {
   app.route("/api/orders", orders);
   app.route("/api/ledger", ledger);
   app.route("/api/analytics", analytics);
+  app.route("/api/transfers", transfers);
 
   // 404
   app.notFound((c) => c.json({ error: "Not Found", path: c.req.path }, 404));

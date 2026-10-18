@@ -62,7 +62,8 @@ analytics.get("/summary", async (c) => {
   const categoryFilter = (c.req.query("category") ?? "All").trim();
 
   const user = (c as any).get("user" as any) as any;
-  const { shopId } = getShopScope(c);
+  const { shopId: rawShopId } = getShopScope(c);
+  const shopId = rawShopId === "all" ? null : rawShopId;
   if (!shopId && user.role !== "SUPER_ADMIN") return c.json({ error: "Shop not assigned" }, 403);
   const shopFilter: Record<string, unknown> = shopId ? { shopId } : {};
 
@@ -419,7 +420,7 @@ analytics.get("/sections", async (c) => {
 
   const user = (c as any).get("user" as any) as any;
   const isSuper = user?.role === "SUPER_ADMIN";
-  const queryShopId = c.req.query("shopId") || null;
+  const queryShopId = (c.req.query("shopId") || null) === "all" ? null : (c.req.query("shopId") || null);
   const scopeShopId = isSuper ? queryShopId : user?.shopId || null;
   if (!scopeShopId && !isSuper) return c.json({ error: "Shop not assigned" }, 403);
   const shopFilter: Record<string, unknown> = scopeShopId ? { shopId: scopeShopId } : {};
@@ -585,7 +586,8 @@ analytics.get("/export", async (c) => {
   const granularityRaw = c.req.query("granularity");
   const format = (c.req.query("format") ?? "csv").toLowerCase();
   const user = (c as any).get("user" as any) as any;
-  const { shopId } = getShopScope(c);
+  const { shopId: rawShopId } = getShopScope(c);
+  const shopId = rawShopId === "all" ? null : rawShopId;
   if (!shopId && user.role !== "SUPER_ADMIN") return c.json({ error: "Shop not assigned" }, 403);
   const shopFilter: Record<string, unknown> = shopId ? { shopId } : {};
 

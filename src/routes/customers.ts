@@ -307,6 +307,12 @@ customers.post("/", async (c) => {
     if (trimmedPhone) {
       const existing = await prisma.customer.findFirst({ where: { shopId, phone: trimmedPhone, deletedAt: null } });
       if (existing) return c.json({ error: "Customer with this phone already exists", code: "PHONE_TAKEN", customer: existing }, 409);
+      // Cross-shop dedup: same phone at another shop — return the match so frontend can link instead of duplicate
+      const crossShop = await prisma.customer.findFirst({ where: { phone: trimmedPhone, deletedAt: null }, orderBy: { createdAt: "asc" } });
+      if (crossShop && (crossShop as any).shopId !== shopId) {
+        const otherShop = await prisma.shop.findUnique({ where: { id: (crossShop as any).shopId }, select: { id: true, name: true, code: true } });
+        return c.json({ error: "Customer with this phone exists at another shop", code: "PHONE_TAKEN_CROSS_SHOP", customer: crossShop, otherShop }, 409);
+      }
     }
 
     // Never trust client balance — always 0, modulated via orders/ledger tx

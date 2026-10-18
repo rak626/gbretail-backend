@@ -444,6 +444,64 @@ orders.post("/", async (c) => {
         }
       }
 
+      // FEFO: fetch active batches with stock, earliest expiry first, for all products in this order
+      const batchMap = new Map<string, any[]>();
+      if (prodIds.length) {
+        const allBatches = await tx.productBatch.findMany({
+          where: {
+            productId: { in: prodIds },
+            deletedAt: null,
+            quantity: { gt: 0 },
+          },
+          orderBy: [{ expiryDate: "asc" }, { receivedAt: "asc" }],
+        });
+        for (const b of allBatches) {
+          const arr = batchMap.get(b.productId) ?? [];
+          arr.push(b);
+          batchMap.set(b.productId, arr);
+        }
+      }
+
+      // FEFO allocation per line item — returns first batchId + full batch allocations.
+      // If product has no batches, returns batchId: null (product-level stock only).
+      const allocateBatch = (pid: string, qty: number): { batchId: string | null; allocations: Array<{ batchId: string; qty: number }> } => {
+        const batches = batchMap.get(pid) ?? [];
+        // No batches for this product — product-level stock only, no batch tracking
+        if (batches.length === 0) return { batchId: null, allocations: [] };
+        const allocations: Array<{ batchId: string; qty: number }> = [];
+        let remaining = qty;
+        let firstBatchId: string | null = null;
+        for (const b of batches) {
+          if (remaining <= 0) break;
+          const take = Math.min(remaining, Number(b.quantity));
+          if (take > 0) {
+            if (!firstBatchId) firstBatchId = b.id;
+            allocations.push({ batchId: b.id, qty: take });
+            remaining -= take;
+          }
+        }
+        if (remaining > 0) return { batchId: null, allocations: [] };
+        return { batchId: firstBatchId, allocations };
+      };
+
+      // Validate sufficient stock across batches for each item.
+      // For products without batches, product-level stock is checked later during decrement.
+      const itemAllocations = new Map<string, { batchId: string | null; allocations: Array<{ batchId: string; qty: number }> }>();
+      for (const it of items as Record<string, unknown>[]) {
+        if (!it.isCustom && it.productId) {
+          const pid = String(it.productId);
+          const qty = Number(it.quantity ?? it.weight ?? 1);
+          if (qty <= 0) continue;
+          const alloc = allocateBatch(pid, qty);
+          // Only reject if product HAS batches but they're insufficient
+          if (batchMap.has(pid) && !alloc.batchId) {
+            const prod = prodById.get(pid) as any;
+            throw new AppError(409, `Insufficient stock for ${prod?.name ?? (it as any).name}. Requested: ${qty}`);
+          }
+          itemAllocations.set(pid, alloc);
+        }
+      }
+
       // Create order with shop/counter/user tracking — orderNumber already shop-unique with random tail, no retry needed
       const createdOrder = await tx.order.create({
         data: {
@@ -462,8 +520,10 @@ orders.post("/", async (c) => {
             create: (items as Record<string, unknown>[]).map((it) => {
               const pid = (it.productId as string) || null;
               const customCost = it.costPrice != null ? parseMoney(it.costPrice) : NaN;
+              const alloc = pid ? itemAllocations.get(pid) : null;
               return {
                 productId: pid,
+                batchId: alloc?.batchId ?? null,
                 name: String(it.name),
                 price: round2(Number(it.price)),
                 unit: String(it.unit ?? "pcs"),
@@ -499,28 +559,49 @@ orders.post("/", async (c) => {
         });
       }
 
-      // Stock decrement — conditional per-item (validated above in one batched fetch).
-      // N updateMany (atomic per row) + 1 batched after-read for warnings (was 3N).
+      // FEFO stock decrement — reduce batch quantities (earliest expiry first),
+      // then decrement product.stockQuantity for backward-compat dashboards.
+      const batchDecrements = new Map<string, number>();
       const decrementedIds: string[] = [];
       for (const it of items as Record<string, unknown>[]) {
         if (!it.isCustom && it.productId) {
+          const pid = String(it.productId);
           const qty = Number(it.quantity ?? it.weight ?? 1);
           if (qty <= 0) continue;
-          // Attempt conditional decrement
+          const alloc = itemAllocations.get(pid);
+          if (!alloc) continue;
+          // Record per-batch decrements
+          for (const { batchId, qty: take } of alloc.allocations) {
+            const current = batchDecrements.get(batchId) ?? 0;
+            batchDecrements.set(batchId, current + take);
+          }
+          decrementedIds.push(pid);
+          // Decrement product-level stock (backward-compat for dashboards/reports)
           const res = await tx.product.updateMany({
-            where: { id: String(it.productId), stockQuantity: { gte: qty } },
+            where: { id: pid, stockQuantity: { gte: qty } },
             data: { stockQuantity: { decrement: qty } },
           });
           if ((res as any).count === 0) {
-            // insufficient stock
-            const fresh = await tx.product.findUnique({ where: { id: String(it.productId) }, select: { stockQuantity: true, name: true } });
+            const fresh = await tx.product.findUnique({ where: { id: pid }, select: { stockQuantity: true, name: true } });
             throw new AppError(409, `Insufficient stock for ${fresh?.name ?? (it as any).name}. Available: ${dec((fresh as any)?.stockQuantity) ?? 0}, requested: ${qty}`);
           }
-          decrementedIds.push(String(it.productId));
         }
       }
-      if (decrementedIds.length) {
-        const afters = await tx.product.findMany({ where: { id: { in: decrementedIds } }, select: { id: true, stockQuantity: true, name: true, lowStockThreshold: true, unit: true } });
+      // Apply batch-level decrements (conditional to avoid selling past available batch qty)
+      for (const [batchId, totalQty] of batchDecrements) {
+        const res = await tx.productBatch.updateMany({
+          where: { id: batchId, quantity: { gte: totalQty } },
+          data: { quantity: { decrement: totalQty } },
+        });
+        if ((res as any).count === 0) {
+          throw new AppError(409, `Insufficient batch stock for batch ${batchId}`);
+        }
+      }
+
+      // Low stock warnings (product-level)
+      const uniqueDecrementedIds = [...new Set(decrementedIds)];
+      if (uniqueDecrementedIds.length) {
+        const afters = await tx.product.findMany({ where: { id: { in: uniqueDecrementedIds } }, select: { id: true, stockQuantity: true, name: true, lowStockThreshold: true, unit: true } });
         for (const after of afters) {
           if (dec((after as any).stockQuantity) <= dec((after as any).lowStockThreshold ?? 10)) {
             lowStockWarnings.push({
@@ -619,7 +700,13 @@ orders.patch("/:id/status", async (c) => {
         for (const it of existing.items ?? []) {
           if (!it.isCustom && it.productId) {
             const qty = Number(it.quantity ?? it.weight ?? 0);
-            if (qty > 0) await tx.product.updateMany({ where: { id: String(it.productId) }, data: { stockQuantity: { increment: qty } } });
+            if (qty > 0) {
+              await tx.product.updateMany({ where: { id: String(it.productId) }, data: { stockQuantity: { increment: qty } } });
+              // Restore batch quantity (FEFO — return to the batch that was consumed)
+              if (it.batchId) {
+                await tx.productBatch.update({ where: { id: it.batchId }, data: { quantity: { increment: qty } } });
+              }
+            }
           }
         }
         if (existing.customerId) {
@@ -781,6 +868,10 @@ orders.delete("/:id", async (c) => {
           const qty = Number(it.quantity ?? it.weight ?? 0);
           if (qty > 0) {
             await tx.product.updateMany({ where: { id: String(it.productId) }, data: { stockQuantity: { increment: qty } } });
+            // Restore batch quantity (FEFO — return to the batch that was consumed)
+            if (it.batchId) {
+              await tx.productBatch.update({ where: { id: it.batchId }, data: { quantity: { increment: qty } } });
+            }
           }
         }
       }
@@ -833,6 +924,16 @@ orders.post("/:id/restore", async (c) => {
             if ((res as any).count === 0) {
               const fresh = await tx.product.findUnique({ where: { id: String(it.productId) }, select: { stockQuantity: true, name: true } });
               throw new AppError(409, `Cannot restore — insufficient stock for ${fresh?.name ?? (it as any).name}`);
+            }
+            // Re-decrement batch quantity (FEFO — consume from the same batch)
+            if (it.batchId) {
+              const batchRes = await tx.productBatch.updateMany({
+                where: { id: it.batchId, quantity: { gte: qty } },
+                data: { quantity: { decrement: qty } },
+              });
+              if ((batchRes as any).count === 0) {
+                throw new AppError(409, `Cannot restore — insufficient batch stock for ${(it as any).name}`);
+              }
             }
           }
         }

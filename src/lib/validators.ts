@@ -1,6 +1,53 @@
 // Simple validators — could be replaced by zod but lightweight for now
 import { normalizePhone, validatePhone, normalizeEmail, validateEmail } from "./normalize.js";
 
+export type BatchInput = {
+  batchNo: string;
+  expiryDate: Date | null;
+  mrp: number | null;
+  costPrice: number;
+  quantity: number;
+};
+
+export function validateBatchInput(body: Record<string, unknown>): BatchInput {
+  const batchNo = String(body.batchNo ?? "").trim();
+  if (!batchNo) throw Object.assign(new Error("batchNo is required"), { status: 400 });
+  if (batchNo.length > 50) throw Object.assign(new Error("batchNo too long (max 50)"), { status: 400 });
+
+  let expiryDate: Date | null = null;
+  if (body.expiryDate != null && String(body.expiryDate).trim() !== "") {
+    const parsed = new Date(String(body.expiryDate));
+    if (isNaN(parsed.getTime())) throw Object.assign(new Error("Invalid expiryDate"), { status: 400 });
+    expiryDate = parsed;
+  }
+
+  let mrp: number | null = null;
+  if (body.mrp != null && String(body.mrp).trim() !== "") {
+    const v = Number(body.mrp);
+    if (isNaN(v) || v < 0 || v > 1_000_000) throw Object.assign(new Error("Invalid mrp (0 - 1000000)"), { status: 400 });
+    mrp = Math.round(v * 100) / 100;
+  }
+
+  const cost = Number(body.costPrice);
+  if (isNaN(cost) || cost < 0 || cost > 1_000_000) throw Object.assign(new Error("costPrice (buying price) is required and must be >=0"), { status: 400 });
+
+  const qty = Number(body.quantity);
+  if (isNaN(qty) || qty < 0) throw Object.assign(new Error("quantity must be >= 0"), { status: 400 });
+
+  return { batchNo, expiryDate, mrp, costPrice: Math.round(cost * 100) / 100, quantity: qty };
+}
+
+export function parseExpiry(v: unknown): Date | null {
+  if (v == null) return null;
+  const d = new Date(String(v));
+  return isNaN(d.getTime()) ? null : d;
+}
+
+export function formatExpiry(d: Date | null): string | null {
+  if (!d) return null;
+  return d.toISOString();
+}
+
 export type CustomerInput = {
   name: string;
   phone: string | null;

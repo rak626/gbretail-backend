@@ -39,6 +39,14 @@ enum Fulfilment {
   delivery
 }
 
+enum TransferStatus {
+  requested
+  approved
+  in_transit
+  received
+  rejected
+}
+
 enum LedgerStatus {
   pending
   settled
@@ -78,9 +86,12 @@ model Shop {
   counters      Counter[]
   users         User[]
   products      Product[]
+  batches       ProductBatch[]
   orders        Order[]
   ledgerEntries LedgerEntry[]
   customers     Customer[]
+  stockTransfersFrom StockTransfer[] @relation("TransferFrom")
+  stockTransfersTo   StockTransfer[] @relation("TransferTo")
 
   @@index([name])
   @@index([deletedAt])
@@ -135,6 +146,8 @@ model User {
   orders       Order[]
   ledgerEntries LedgerEntry[]
   sessions     Session[]
+  createdStockTransfers StockTransfer[]
+  approvedStockTransfers StockTransfer[] @relation("TransferApprover")
 
   @@index([email])
   @@index([shopId])
@@ -187,6 +200,8 @@ model Product {
   createdAt      DateTime    @default(now())
   updatedAt      DateTime    @updatedAt
   orderItems     OrderItem[]
+  batches        ProductBatch[]
+  stockTransferItems StockTransferItem[]
 
   // Active-only barcode uniqueness enforced by partial index in migration:
   // CREATE UNIQUE INDEX ... ON "Product"("shopId","barcode") WHERE "deletedAt" IS NULL AND "barcode" IS NOT NULL
@@ -197,6 +212,33 @@ model Product {
   @@index([shopId, isOnline])
   @@index([category])
   @@index([name])
+  @@index([deletedAt])
+}
+
+// Per-batch stock with expiry / MRP tracking. Linked to a product so historical
+// order items still reference the product; batches are the consumable unit.
+model ProductBatch {
+  id        String   @id @default(cuid())
+  productId String
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Restrict)
+  shopId    String
+  shop      Shop     @relation(fields: [shopId], references: [id], onDelete: Restrict)
+  batchNo   String
+  expiryDate DateTime?
+  mrp       Decimal? @db.Decimal(12, 2)
+  costPrice Decimal  @default(0) @db.Decimal(12, 2)
+  quantity  Decimal  @default(0) @db.Decimal(12, 3)
+  receivedAt DateTime @default(now())
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  orderItems             OrderItem[]
+  stockTransferItems     StockTransferItem[]
+
+  @@index([shopId])
+  @@index([productId])
+  @@index([expiryDate])
+  @@index([shopId, expiryDate])
   @@index([deletedAt])
 }
 
@@ -311,6 +353,8 @@ model OrderItem {
   order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
   productId String?
   product   Product? @relation(fields: [productId], references: [id], onDelete: Restrict)
+  batchId   String?
+  batch     ProductBatch? @relation(fields: [batchId], references: [id])
   name      String
   price     Decimal   @db.Decimal(12, 2)
   unit      String
@@ -326,6 +370,7 @@ model OrderItem {
 
   @@index([orderId])
   @@index([productId])
+  @@index([batchId])
   @@index([category])
 }
 
@@ -374,4 +419,44 @@ model ShopOrderSeq {
   shopId    String   @id
   lastNo    Int      @default(0)
   updatedAt DateTime @updatedAt
+}
+
+// Inter-shop stock transfer. A shop requests stock from another shop;
+// SUPER_ADMIN or destination owner approves; destination receives stock.
+model StockTransfer {
+  id           String          @id @default(cuid())
+  fromShopId   String
+  fromShop     Shop            @relation("TransferFrom", fields: [fromShopId], references: [id])
+  toShopId     String
+  toShop       Shop            @relation("TransferTo", fields: [toShopId], references: [id])
+  status       TransferStatus  @default(requested)
+  createdBy    String
+  createdByUser User           @relation(fields: [createdBy], references: [id])
+  approvedBy   String?
+  approvedByUser User?         @relation("TransferApprover", fields: [approvedBy], references: [id])
+  createdAt    DateTime        @default(now())
+  completedAt  DateTime?
+  deletedAt    DateTime?
+  items        StockTransferItem[]
+
+  @@index([fromShopId])
+  @@index([toShopId])
+  @@index([status])
+  @@index([deletedAt])
+}
+
+model StockTransferItem {
+  id         String   @id @default(cuid())
+  transferId String
+  transfer   StockTransfer @relation(fields: [transferId], references: [id], onDelete: Cascade)
+  productId  String
+  product    Product  @relation(fields: [productId], references: [id])
+  batchId    String?
+  batch      ProductBatch? @relation(fields: [batchId], references: [id])
+  quantity   Decimal  @db.Decimal(12, 3)
+  unitCost   Decimal? @db.Decimal(12, 2)
+
+  @@index([transferId])
+  @@index([productId])
+  @@index([batchId])
 }
