@@ -92,6 +92,7 @@ model Shop {
   customers     Customer[]
   stockTransfersFrom StockTransfer[] @relation("TransferFrom")
   stockTransfersTo   StockTransfer[] @relation("TransferTo")
+  shopProducts       ShopProduct[]
 
   @@index([name])
   @@index([deletedAt])
@@ -353,8 +354,12 @@ model OrderItem {
   order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
   productId String?
   product   Product? @relation(fields: [productId], references: [id], onDelete: Restrict)
+  shopProductId String?
+  shopProduct  ShopProduct? @relation(fields: [shopProductId], references: [id])
   batchId   String?
   batch     ProductBatch? @relation(fields: [batchId], references: [id])
+  shopProductBatchId String?
+  shopProductBatch  ShopProductBatch? @relation(fields: [shopProductBatchId], references: [id])
   name      String
   price     Decimal   @db.Decimal(12, 2)
   unit      String
@@ -370,6 +375,7 @@ model OrderItem {
 
   @@index([orderId])
   @@index([productId])
+  @@index([shopProductId])
   @@index([batchId])
   @@index([category])
 }
@@ -419,6 +425,86 @@ model ShopOrderSeq {
   shopId    String   @id
   lastNo    Int      @default(0)
   updatedAt DateTime @updatedAt
+}
+
+// Master catalog — global product definition shared across all shops.
+// No shopId: one row per unique SKU (e.g., "Basmati Rice 5kg — BrandA").
+// Shop owners enable/disable master products at their shop via ShopProduct.
+model MasterProduct {
+  id          String   @id @default(cuid())
+  name        String
+  category    String
+  brand       String?
+  barcode     String?    @unique
+  is_loose    Boolean    @default(false)
+  unit        String     @default("pcs")
+  basePrice   Decimal?   @db.Decimal(12, 2)  // suggested retail price
+  imageUrl    String?
+  preset_weights Decimal[] @default([]) @db.Decimal(12, 3)
+  preset_prices  Decimal[]  @default([]) @db.Decimal(12, 2)
+  isActive    Boolean    @default(true)    // globally active/inactive
+  deletedAt   DateTime?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  shopProducts ShopProduct[]
+
+  @@index([barcode])
+  @@index([category])
+  @@index([name])
+  @@index([brand])
+  @@index([isActive])
+  @@index([deletedAt])
+}
+
+// Shop-specific product listing — links a shop to a master product.
+// Each shop enables/disables master products and sets its own price/stock.
+model ShopProduct {
+  id               String   @id @default(cuid())
+  shopId           String
+  shop             Shop     @relation(fields: [shopId], references: [id], onDelete: Restrict)
+  masterProductId  String
+  masterProduct    MasterProduct @relation(fields: [masterProductId], references: [id])
+  isEnabled        Boolean  @default(true)
+  shopPrice        Decimal?   @db.Decimal(12, 2)  // override master basePrice
+  costPrice        Decimal    @default(0) @db.Decimal(12, 2)
+  stockQuantity    Decimal    @default(0) @db.Decimal(12, 3)
+  lowStockThreshold Decimal  @default(10) @db.Decimal(12, 3)
+  shopBarcode      String?    // shop-specific barcode override
+  isOnline         Boolean    @default(false)
+  onlinePrice      Decimal?   @db.Decimal(12, 2)
+  deletedAt        DateTime?
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+  batches          ShopProductBatch[]
+  orderItems       OrderItem[]
+
+  @@index([shopId])
+  @@index([masterProductId])
+  @@unique([shopId, masterProductId])
+  @@index([shopId, isEnabled])
+  @@index([shopId, deletedAt])
+  @@index([shopBarcode])
+}
+
+// Per-batch stock with expiry/MRP tracking — tied to a ShopProduct (per-shop).
+model ShopProductBatch {
+  id              String   @id @default(cuid())
+  shopProductId   String
+  shopProduct     ShopProduct @relation(fields: [shopProductId], references: [id], onDelete: Restrict)
+  batchNo         String
+  expiryDate      DateTime?
+  mrp             Decimal?   @db.Decimal(12, 2)
+  costPrice       Decimal    @default(0) @db.Decimal(12, 2)
+  quantity        Decimal    @default(0) @db.Decimal(12, 3)
+  receivedAt      DateTime   @default(now())
+  deletedAt       DateTime?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+  orderItems      OrderItem[]
+
+  @@index([shopProductId])
+  @@index([expiryDate])
+  @@index([deletedAt])
 }
 
 // Inter-shop stock transfer. A shop requests stock from another shop;
