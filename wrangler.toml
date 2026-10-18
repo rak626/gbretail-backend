@@ -10,8 +10,13 @@ USE_NEON = "1"
 NODE_ENV = "production"
 WORKER = "1"
 
+# CORS_ORIGIN — set to your production frontend URLs via `wrangler var put CORS_ORIGIN`
+# e.g. "https://shop1.yourdomain.com,https://shop2.yourdomain.com,https://online.yourdomain.com"
+
 # Secrets (set via `wrangler secret put DATABASE_URL`)
 # DATABASE_URL = "postgresql://..."
+# JWT_ACCESS_SECRET = "..."  (via `wrangler secret put JWT_ACCESS_SECRET`)
+# JWT_REFRESH_SECRET = "..." (via `wrangler secret put JWT_REFRESH_SECRET`)
 
 [observability]
 enabled = true
