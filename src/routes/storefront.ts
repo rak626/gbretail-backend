@@ -190,6 +190,20 @@ store.post("/register", async (c) => {
     if (phoneTaken) return c.json({ error: "Phone already registered — login instead", code: "PHONE_TAKEN" }, 409);
     const emailTaken: any = await prisma.onlineUser.findUnique({ where: { email } });
     if (emailTaken) return c.json({ error: "Email already registered — login instead", code: "EMAIL_TAKEN" }, 409);
+
+    // Cross-shop dedup: if this phone already exists as a POS customer at any shop,
+    // offer to link instead of creating a duplicate online account.
+    const confirmLink = body.confirmLink === true;
+    const existingCust = await prisma.customer.findFirst({ where: { phone, deletedAt: null }, orderBy: { createdAt: "asc" } });
+    if (existingCust && !confirmLink) {
+      const shop = await prisma.shop.findUnique({ where: { id: existingCust.shopId }, select: { id: true, name: true, code: true } });
+      return c.json({
+        error: "Customer with this phone exists at another shop",
+        code: "PHONE_TAKEN_CROSS_SHOP",
+        customer: { id: existingCust.id, name: existingCust.name, phone: existingCust.phone, shopId: existingCust.shopId },
+        otherShop: shop,
+      }, 409);
+    }
     const created: any = await prisma.onlineUser.create({
       data: { name, phone, email, address, passwordHash: await hashPw(password) },
     });
