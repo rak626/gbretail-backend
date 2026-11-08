@@ -1,0 +1,286 @@
+name,category,brand,barcode,unit,is_loose,base_price,image_url
+Rice - FreshFarm,Staples,FreshFarm,8900000000001,kg,true,123.2,https://images.gbretail.com/1.jpg
+Rice - DailyFresh,Staples,DailyFresh,8900000000002,kg,true,340.68,https://images.gbretail.com/2.jpg
+Rice - PureNature,Staples,PureNature,8900000000003,kg,true,185.4,https://images.gbretail.com/3.jpg
+Wheat Flour - FreshFarm,Staples,FreshFarm,8900000000004,kg,true,85.13,https://images.gbretail.com/4.jpg
+Wheat Flour - DailyFresh,Staples,DailyFresh,8900000000005,kg,true,171.14,https://images.gbretail.com/5.jpg
+Wheat Flour - PureNature,Staples,PureNature,8900000000006,kg,true,141.69,https://images.gbretail.com/6.jpg
+Sugar - FreshFarm,Staples,FreshFarm,8900000000007,kg,true,181.4,https://images.gbretail.com/7.jpg
+Sugar - DailyFresh,Staples,DailyFresh,8900000000008,kg,true,171.6,https://images.gbretail.com/8.jpg
+Sugar - PureNature,Staples,PureNature,8900000000009,kg,true,164.41,https://images.gbretail.com/9.jpg
+Salt - FreshFarm,Staples,FreshFarm,8900000000010,kg,true,370.36,https://images.gbretail.com/10.jpg
+Salt - DailyFresh,Staples,DailyFresh,8900000000011,kg,true,108.01,https://images.gbretail.com/11.jpg
+Salt - PureNature,Staples,PureNature,8900000000012,kg,true,342.03,https://images.gbretail.com/12.jpg
+Lentils - FreshFarm,Staples,FreshFarm,8900000000013,kg,true,40.28,https://images.gbretail.com/13.jpg
+Lentils - DailyFresh,Staples,DailyFresh,8900000000014,kg,true,69.53,https://images.gbretail.com/14.jpg
+Lentils - PureNature,Staples,PureNature,8900000000015,kg,true,427.37,https://images.gbretail.com/15.jpg
+Pasta - FreshFarm,Staples,FreshFarm,8900000000016,kg,true,466.29,https://images.gbretail.com/16.jpg
+Pasta - DailyFresh,Staples,DailyFresh,8900000000017,kg,true,332.94,https://images.gbretail.com/17.jpg
+Pasta - PureNature,Staples,PureNature,8900000000018,kg,true,493.9,https://images.gbretail.com/18.jpg
+Oats - FreshFarm,Staples,FreshFarm,8900000000019,kg,true,122.21,https://images.gbretail.com/19.jpg
+Oats - DailyFresh,Staples,DailyFresh,8900000000020,kg,true,394.32,https://images.gbretail.com/20.jpg
+Oats - PureNature,Staples,PureNature,8900000000021,kg,true,456.55,https://images.gbretail.com/21.jpg
+Cornflakes - FreshFarm,Staples,FreshFarm,8900000000022,kg,true,471.41,https://images.gbretail.com/22.jpg
+Cornflakes - DailyFresh,Staples,DailyFresh,8900000000023,kg,true,473.51,https://images.gbretail.com/23.jpg
+Cornflakes - PureNature,Staples,PureNature,8900000000024,kg,true,495.22,https://images.gbretail.com/24.jpg
+Semolina - FreshFarm,Staples,FreshFarm,8900000000025,kg,true,441.51,https://images.gbretail.com/25.jpg
+Semolina - DailyFresh,Staples,DailyFresh,8900000000026,kg,true,172.83,https://images.gbretail.com/26.jpg
+Semolina - PureNature,Staples,PureNature,8900000000027,kg,true,30.47,https://images.gbretail.com/27.jpg
+Besan - FreshFarm,Staples,FreshFarm,8900000000028,kg,true,46.9,https://images.gbretail.com/28.jpg
+Besan - DailyFresh,Staples,DailyFresh,8900000000029,kg,true,217.66,https://images.gbretail.com/29.jpg
+Besan - PureNature,Staples,PureNature,8900000000030,kg,true,326.42,https://images.gbretail.com/30.jpg
+Milk - FreshFarm,Dairy,FreshFarm,8900000000031,pcs,false,406.8,https://images.gbretail.com/31.jpg
+Milk - DailyFresh,Dairy,DailyFresh,8900000000032,pcs,false,144.0,https://images.gbretail.com/32.jpg
+Milk - PureNature,Dairy,PureNature,8900000000033,pcs,false,96.55,https://images.gbretail.com/33.jpg
+Curd - FreshFarm,Dairy,FreshFarm,8900000000034,pcs,false,432.88,https://images.gbretail.com/34.jpg
+Curd - DailyFresh,Dairy,DailyFresh,8900000000035,pcs,false,50.72,https://images.gbretail.com/35.jpg
+Curd - PureNature,Dairy,PureNature,8900000000036,pcs,false,74.67,https://images.gbretail.com/36.jpg
+Paneer - FreshFarm,Dairy,FreshFarm,8900000000037,pcs,false,207.6,https://images.gbretail.com/37.jpg
+Paneer - DailyFresh,Dairy,DailyFresh,8900000000038,pcs,false,289.57,https://images.gbretail.com/38.jpg
+Paneer - PureNature,Dairy,PureNature,8900000000039,pcs,false,242.92,https://images.gbretail.com/39.jpg
+Butter - FreshFarm,Dairy,FreshFarm,8900000000040,pcs,false,288.51,https://images.gbretail.com/40.jpg
+Butter - DailyFresh,Dairy,DailyFresh,8900000000041,pcs,false,230.65,https://images.gbretail.com/41.jpg
+Butter - PureNature,Dairy,PureNature,8900000000042,pcs,false,237.85,https://images.gbretail.com/42.jpg
+Cheese - FreshFarm,Dairy,FreshFarm,8900000000043,pcs,false,323.47,https://images.gbretail.com/43.jpg
+Cheese - DailyFresh,Dairy,DailyFresh,8900000000044,pcs,false,327.11,https://images.gbretail.com/44.jpg
+Cheese - PureNature,Dairy,PureNature,8900000000045,pcs,false,289.05,https://images.gbretail.com/45.jpg
+Ghee - FreshFarm,Dairy,FreshFarm,8900000000046,pcs,false,361.24,https://images.gbretail.com/46.jpg
+Ghee - DailyFresh,Dairy,DailyFresh,8900000000047,pcs,false,453.09,https://images.gbretail.com/47.jpg
+Ghee - PureNature,Dairy,PureNature,8900000000048,pcs,false,303.17,https://images.gbretail.com/48.jpg
+Cream - FreshFarm,Dairy,FreshFarm,8900000000049,pcs,false,145.09,https://images.gbretail.com/49.jpg
+Cream - DailyFresh,Dairy,DailyFresh,8900000000050,pcs,false,487.71,https://images.gbretail.com/50.jpg
+Cream - PureNature,Dairy,PureNature,8900000000051,pcs,false,268.14,https://images.gbretail.com/51.jpg
+Buttermilk - FreshFarm,Dairy,FreshFarm,8900000000052,pcs,false,116.07,https://images.gbretail.com/52.jpg
+Buttermilk - DailyFresh,Dairy,DailyFresh,8900000000053,pcs,false,207.54,https://images.gbretail.com/53.jpg
+Buttermilk - PureNature,Dairy,PureNature,8900000000054,pcs,false,23.76,https://images.gbretail.com/54.jpg
+Tea - FreshFarm,Beverages,FreshFarm,8900000000055,pcs,false,152.17,https://images.gbretail.com/55.jpg
+Tea - DailyFresh,Beverages,DailyFresh,8900000000056,pcs,false,14.96,https://images.gbretail.com/56.jpg
+Tea - PureNature,Beverages,PureNature,8900000000057,pcs,false,271.6,https://images.gbretail.com/57.jpg
+Coffee - FreshFarm,Beverages,FreshFarm,8900000000058,pcs,false,472.09,https://images.gbretail.com/58.jpg
+Coffee - DailyFresh,Beverages,DailyFresh,8900000000059,pcs,false,471.87,https://images.gbretail.com/59.jpg
+Coffee - PureNature,Beverages,PureNature,8900000000060,pcs,false,387.63,https://images.gbretail.com/60.jpg
+Juice - FreshFarm,Beverages,FreshFarm,8900000000061,pcs,false,127.5,https://images.gbretail.com/61.jpg
+Juice - DailyFresh,Beverages,DailyFresh,8900000000062,pcs,false,172.6,https://images.gbretail.com/62.jpg
+Juice - PureNature,Beverages,PureNature,8900000000063,pcs,false,124.55,https://images.gbretail.com/63.jpg
+Soft Drink - FreshFarm,Beverages,FreshFarm,8900000000064,pcs,false,271.0,https://images.gbretail.com/64.jpg
+Soft Drink - DailyFresh,Beverages,DailyFresh,8900000000065,pcs,false,195.73,https://images.gbretail.com/65.jpg
+Soft Drink - PureNature,Beverages,PureNature,8900000000066,pcs,false,94.74,https://images.gbretail.com/66.jpg
+Mineral Water - FreshFarm,Beverages,FreshFarm,8900000000067,pcs,false,274.02,https://images.gbretail.com/67.jpg
+Mineral Water - DailyFresh,Beverages,DailyFresh,8900000000068,pcs,false,336.66,https://images.gbretail.com/68.jpg
+Mineral Water - PureNature,Beverages,PureNature,8900000000069,pcs,false,219.73,https://images.gbretail.com/69.jpg
+Energy Drink - FreshFarm,Beverages,FreshFarm,8900000000070,pcs,false,499.17,https://images.gbretail.com/70.jpg
+Energy Drink - DailyFresh,Beverages,DailyFresh,8900000000071,pcs,false,467.68,https://images.gbretail.com/71.jpg
+Energy Drink - PureNature,Beverages,PureNature,8900000000072,pcs,false,335.83,https://images.gbretail.com/72.jpg
+Milkshake - FreshFarm,Beverages,FreshFarm,8900000000073,pcs,false,340.78,https://images.gbretail.com/73.jpg
+Milkshake - DailyFresh,Beverages,DailyFresh,8900000000074,pcs,false,264.34,https://images.gbretail.com/74.jpg
+Milkshake - PureNature,Beverages,PureNature,8900000000075,pcs,false,143.93,https://images.gbretail.com/75.jpg
+Biscuits - FreshFarm,Snacks,FreshFarm,8900000000076,pcs,false,497.53,https://images.gbretail.com/76.jpg
+Biscuits - DailyFresh,Snacks,DailyFresh,8900000000077,pcs,false,496.65,https://images.gbretail.com/77.jpg
+Biscuits - PureNature,Snacks,PureNature,8900000000078,pcs,false,128.22,https://images.gbretail.com/78.jpg
+Chips - FreshFarm,Snacks,FreshFarm,8900000000079,pcs,false,199.0,https://images.gbretail.com/79.jpg
+Chips - DailyFresh,Snacks,DailyFresh,8900000000080,pcs,false,92.77,https://images.gbretail.com/80.jpg
+Chips - PureNature,Snacks,PureNature,8900000000081,pcs,false,320.71,https://images.gbretail.com/81.jpg
+Namkeen - FreshFarm,Snacks,FreshFarm,8900000000082,pcs,false,430.48,https://images.gbretail.com/82.jpg
+Namkeen - DailyFresh,Snacks,DailyFresh,8900000000083,pcs,false,361.83,https://images.gbretail.com/83.jpg
+Namkeen - PureNature,Snacks,PureNature,8900000000084,pcs,false,28.1,https://images.gbretail.com/84.jpg
+Chocolate - FreshFarm,Snacks,FreshFarm,8900000000085,pcs,false,262.09,https://images.gbretail.com/85.jpg
+Chocolate - DailyFresh,Snacks,DailyFresh,8900000000086,pcs,false,116.93,https://images.gbretail.com/86.jpg
+Chocolate - PureNature,Snacks,PureNature,8900000000087,pcs,false,261.14,https://images.gbretail.com/87.jpg
+Candy - FreshFarm,Snacks,FreshFarm,8900000000088,pcs,false,49.9,https://images.gbretail.com/88.jpg
+Candy - DailyFresh,Snacks,DailyFresh,8900000000089,pcs,false,326.04,https://images.gbretail.com/89.jpg
+Candy - PureNature,Snacks,PureNature,8900000000090,pcs,false,311.56,https://images.gbretail.com/90.jpg
+Popcorn - FreshFarm,Snacks,FreshFarm,8900000000091,pcs,false,361.44,https://images.gbretail.com/91.jpg
+Popcorn - DailyFresh,Snacks,DailyFresh,8900000000092,pcs,false,328.41,https://images.gbretail.com/92.jpg
+Popcorn - PureNature,Snacks,PureNature,8900000000093,pcs,false,294.77,https://images.gbretail.com/93.jpg
+Crackers - FreshFarm,Snacks,FreshFarm,8900000000094,pcs,false,336.76,https://images.gbretail.com/94.jpg
+Crackers - DailyFresh,Snacks,DailyFresh,8900000000095,pcs,false,358.06,https://images.gbretail.com/95.jpg
+Crackers - PureNature,Snacks,PureNature,8900000000096,pcs,false,48.09,https://images.gbretail.com/96.jpg
+Potatoes - FreshFarm,Produce,FreshFarm,8900000000097,kg,true,36.38,https://images.gbretail.com/97.jpg
+Potatoes - DailyFresh,Produce,DailyFresh,8900000000098,kg,true,132.56,https://images.gbretail.com/98.jpg
+Potatoes - PureNature,Produce,PureNature,8900000000099,kg,true,384.44,https://images.gbretail.com/99.jpg
+Onions - FreshFarm,Produce,FreshFarm,8900000000100,kg,true,447.68,https://images.gbretail.com/100.jpg
+Onions - DailyFresh,Produce,DailyFresh,8900000000101,kg,true,322.75,https://images.gbretail.com/101.jpg
+Onions - PureNature,Produce,PureNature,8900000000102,kg,true,273.29,https://images.gbretail.com/102.jpg
+Tomatoes - FreshFarm,Produce,FreshFarm,8900000000103,kg,true,25.18,https://images.gbretail.com/103.jpg
+Tomatoes - DailyFresh,Produce,DailyFresh,8900000000104,kg,true,114.25,https://images.gbretail.com/104.jpg
+Tomatoes - PureNature,Produce,PureNature,8900000000105,kg,true,242.81,https://images.gbretail.com/105.jpg
+Apples - FreshFarm,Produce,FreshFarm,8900000000106,kg,true,361.33,https://images.gbretail.com/106.jpg
+Apples - DailyFresh,Produce,DailyFresh,8900000000107,kg,true,356.46,https://images.gbretail.com/107.jpg
+Apples - PureNature,Produce,PureNature,8900000000108,kg,true,450.89,https://images.gbretail.com/108.jpg
+Bananas - FreshFarm,Produce,FreshFarm,8900000000109,kg,true,262.87,https://images.gbretail.com/109.jpg
+Bananas - DailyFresh,Produce,DailyFresh,8900000000110,kg,true,277.62,https://images.gbretail.com/110.jpg
+Bananas - PureNature,Produce,PureNature,8900000000111,kg,true,128.12,https://images.gbretail.com/111.jpg
+Carrots - FreshFarm,Produce,FreshFarm,8900000000112,kg,true,41.75,https://images.gbretail.com/112.jpg
+Carrots - DailyFresh,Produce,DailyFresh,8900000000113,kg,true,10.84,https://images.gbretail.com/113.jpg
+Carrots - PureNature,Produce,PureNature,8900000000114,kg,true,252.55,https://images.gbretail.com/114.jpg
+Cabbage - FreshFarm,Produce,FreshFarm,8900000000115,kg,true,400.8,https://images.gbretail.com/115.jpg
+Cabbage - DailyFresh,Produce,DailyFresh,8900000000116,kg,true,109.57,https://images.gbretail.com/116.jpg
+Cabbage - PureNature,Produce,PureNature,8900000000117,kg,true,270.93,https://images.gbretail.com/117.jpg
+Spinach - FreshFarm,Produce,FreshFarm,8900000000118,kg,true,413.34,https://images.gbretail.com/118.jpg
+Spinach - DailyFresh,Produce,DailyFresh,8900000000119,kg,true,382.49,https://images.gbretail.com/119.jpg
+Spinach - PureNature,Produce,PureNature,8900000000120,kg,true,88.57,https://images.gbretail.com/120.jpg
+Milk - FreshFarm,Dairy,FreshFarm,8900000000121,pcs,false,441.22,https://images.gbretail.com/121.jpg
+Milk - DailyFresh,Dairy,DailyFresh,8900000000122,pcs,false,184.71,https://images.gbretail.com/122.jpg
+Milk - PureNature,Dairy,PureNature,8900000000123,pcs,false,330.18,https://images.gbretail.com/123.jpg
+Curd - FreshFarm,Dairy,FreshFarm,8900000000124,pcs,false,269.56,https://images.gbretail.com/124.jpg
+Curd - DailyFresh,Dairy,DailyFresh,8900000000125,pcs,false,282.76,https://images.gbretail.com/125.jpg
+Curd - PureNature,Dairy,PureNature,8900000000126,pcs,false,407.71,https://images.gbretail.com/126.jpg
+Paneer - FreshFarm,Dairy,FreshFarm,8900000000127,pcs,false,497.02,https://images.gbretail.com/127.jpg
+Paneer - DailyFresh,Dairy,DailyFresh,8900000000128,pcs,false,46.06,https://images.gbretail.com/128.jpg
+Paneer - PureNature,Dairy,PureNature,8900000000129,pcs,false,245.71,https://images.gbretail.com/129.jpg
+Butter - FreshFarm,Dairy,FreshFarm,8900000000130,pcs,false,352.13,https://images.gbretail.com/130.jpg
+Butter - DailyFresh,Dairy,DailyFresh,8900000000131,pcs,false,301.29,https://images.gbretail.com/131.jpg
+Butter - PureNature,Dairy,PureNature,8900000000132,pcs,false,163.2,https://images.gbretail.com/132.jpg
+Cheese - FreshFarm,Dairy,FreshFarm,8900000000133,pcs,false,164.1,https://images.gbretail.com/133.jpg
+Cheese - DailyFresh,Dairy,DailyFresh,8900000000134,pcs,false,44.47,https://images.gbretail.com/134.jpg
+Cheese - PureNature,Dairy,PureNature,8900000000135,pcs,false,254.3,https://images.gbretail.com/135.jpg
+Ghee - FreshFarm,Dairy,FreshFarm,8900000000136,pcs,false,376.51,https://images.gbretail.com/136.jpg
+Ghee - DailyFresh,Dairy,DailyFresh,8900000000137,pcs,false,400.63,https://images.gbretail.com/137.jpg
+Ghee - PureNature,Dairy,PureNature,8900000000138,pcs,false,355.21,https://images.gbretail.com/138.jpg
+Cream - FreshFarm,Dairy,FreshFarm,8900000000139,pcs,false,374.16,https://images.gbretail.com/139.jpg
+Cream - DailyFresh,Dairy,DailyFresh,8900000000140,pcs,false,55.8,https://images.gbretail.com/140.jpg
+Cream - PureNature,Dairy,PureNature,8900000000141,pcs,false,135.74,https://images.gbretail.com/141.jpg
+Buttermilk - FreshFarm,Dairy,FreshFarm,8900000000142,pcs,false,252.67,https://images.gbretail.com/142.jpg
+Buttermilk - DailyFresh,Dairy,DailyFresh,8900000000143,pcs,false,436.74,https://images.gbretail.com/143.jpg
+Buttermilk - PureNature,Dairy,PureNature,8900000000144,pcs,false,181.33,https://images.gbretail.com/144.jpg
+Frozen Peas - FreshFarm,Frozen,FreshFarm,8900000000145,pcs,false,170.06,https://images.gbretail.com/145.jpg
+Frozen Peas - DailyFresh,Frozen,DailyFresh,8900000000146,pcs,false,373.96,https://images.gbretail.com/146.jpg
+Frozen Peas - PureNature,Frozen,PureNature,8900000000147,pcs,false,419.36,https://images.gbretail.com/147.jpg
+Frozen Corn - FreshFarm,Frozen,FreshFarm,8900000000148,pcs,false,318.8,https://images.gbretail.com/148.jpg
+Frozen Corn - DailyFresh,Frozen,DailyFresh,8900000000149,pcs,false,223.93,https://images.gbretail.com/149.jpg
+Frozen Corn - PureNature,Frozen,PureNature,8900000000150,pcs,false,169.0,https://images.gbretail.com/150.jpg
+Frozen Fries - FreshFarm,Frozen,FreshFarm,8900000000151,pcs,false,193.12,https://images.gbretail.com/151.jpg
+Frozen Fries - DailyFresh,Frozen,DailyFresh,8900000000152,pcs,false,192.78,https://images.gbretail.com/152.jpg
+Frozen Fries - PureNature,Frozen,PureNature,8900000000153,pcs,false,71.14,https://images.gbretail.com/153.jpg
+Ice Cream - FreshFarm,Frozen,FreshFarm,8900000000154,pcs,false,497.51,https://images.gbretail.com/154.jpg
+Ice Cream - DailyFresh,Frozen,DailyFresh,8900000000155,pcs,false,120.07,https://images.gbretail.com/155.jpg
+Ice Cream - PureNature,Frozen,PureNature,8900000000156,pcs,false,352.96,https://images.gbretail.com/156.jpg
+Frozen Veg Mix - FreshFarm,Frozen,FreshFarm,8900000000157,pcs,false,180.39,https://images.gbretail.com/157.jpg
+Frozen Veg Mix - DailyFresh,Frozen,DailyFresh,8900000000158,pcs,false,111.98,https://images.gbretail.com/158.jpg
+Frozen Veg Mix - PureNature,Frozen,PureNature,8900000000159,pcs,false,89.14,https://images.gbretail.com/159.jpg
+Soap - FreshFarm,Personal Care,FreshFarm,8900000000160,pcs,false,396.94,https://images.gbretail.com/160.jpg
+Soap - DailyFresh,Personal Care,DailyFresh,8900000000161,pcs,false,74.92,https://images.gbretail.com/161.jpg
+Soap - PureNature,Personal Care,PureNature,8900000000162,pcs,false,337.85,https://images.gbretail.com/162.jpg
+Shampoo - FreshFarm,Personal Care,FreshFarm,8900000000163,pcs,false,370.43,https://images.gbretail.com/163.jpg
+Shampoo - DailyFresh,Personal Care,DailyFresh,8900000000164,pcs,false,168.38,https://images.gbretail.com/164.jpg
+Shampoo - PureNature,Personal Care,PureNature,8900000000165,pcs,false,346.19,https://images.gbretail.com/165.jpg
+Toothpaste - FreshFarm,Personal Care,FreshFarm,8900000000166,pcs,false,396.81,https://images.gbretail.com/166.jpg
+Toothpaste - DailyFresh,Personal Care,DailyFresh,8900000000167,pcs,false,11.11,https://images.gbretail.com/167.jpg
+Toothpaste - PureNature,Personal Care,PureNature,8900000000168,pcs,false,18.87,https://images.gbretail.com/168.jpg
+Detergent - FreshFarm,Personal Care,FreshFarm,8900000000169,pcs,false,105.46,https://images.gbretail.com/169.jpg
+Detergent - DailyFresh,Personal Care,DailyFresh,8900000000170,pcs,false,159.21,https://images.gbretail.com/170.jpg
+Detergent - PureNature,Personal Care,PureNature,8900000000171,pcs,false,297.41,https://images.gbretail.com/171.jpg
+Face Wash - FreshFarm,Personal Care,FreshFarm,8900000000172,pcs,false,420.29,https://images.gbretail.com/172.jpg
+Face Wash - DailyFresh,Personal Care,DailyFresh,8900000000173,pcs,false,315.2,https://images.gbretail.com/173.jpg
+Face Wash - PureNature,Personal Care,PureNature,8900000000174,pcs,false,278.67,https://images.gbretail.com/174.jpg
+Lotion - FreshFarm,Personal Care,FreshFarm,8900000000175,pcs,false,298.95,https://images.gbretail.com/175.jpg
+Lotion - DailyFresh,Personal Care,DailyFresh,8900000000176,pcs,false,83.23,https://images.gbretail.com/176.jpg
+Lotion - PureNature,Personal Care,PureNature,8900000000177,pcs,false,171.43,https://images.gbretail.com/177.jpg
+Floor Cleaner - FreshFarm,Household,FreshFarm,8900000000178,pcs,false,78.37,https://images.gbretail.com/178.jpg
+Floor Cleaner - DailyFresh,Household,DailyFresh,8900000000179,pcs,false,157.06,https://images.gbretail.com/179.jpg
+Floor Cleaner - PureNature,Household,PureNature,8900000000180,pcs,false,64.1,https://images.gbretail.com/180.jpg
+Dish Wash - FreshFarm,Household,FreshFarm,8900000000181,pcs,false,144.31,https://images.gbretail.com/181.jpg
+Dish Wash - DailyFresh,Household,DailyFresh,8900000000182,pcs,false,233.65,https://images.gbretail.com/182.jpg
+Dish Wash - PureNature,Household,PureNature,8900000000183,pcs,false,195.39,https://images.gbretail.com/183.jpg
+Toilet Cleaner - FreshFarm,Household,FreshFarm,8900000000184,pcs,false,182.94,https://images.gbretail.com/184.jpg
+Toilet Cleaner - DailyFresh,Household,DailyFresh,8900000000185,pcs,false,406.9,https://images.gbretail.com/185.jpg
+Toilet Cleaner - PureNature,Household,PureNature,8900000000186,pcs,false,311.38,https://images.gbretail.com/186.jpg
+Mosquito Repellent - FreshFarm,Household,FreshFarm,8900000000187,pcs,false,112.99,https://images.gbretail.com/187.jpg
+Mosquito Repellent - DailyFresh,Household,DailyFresh,8900000000188,pcs,false,468.58,https://images.gbretail.com/188.jpg
+Mosquito Repellent - PureNature,Household,PureNature,8900000000189,pcs,false,337.64,https://images.gbretail.com/189.jpg
+Air Freshener - FreshFarm,Household,FreshFarm,8900000000190,pcs,false,29.43,https://images.gbretail.com/190.jpg
+Air Freshener - DailyFresh,Household,DailyFresh,8900000000191,pcs,false,102.82,https://images.gbretail.com/191.jpg
+Air Freshener - PureNature,Household,PureNature,8900000000192,pcs,false,485.36,https://images.gbretail.com/192.jpg
+Turmeric - FreshFarm,Spices,FreshFarm,8900000000193,kg,true,103.73,https://images.gbretail.com/193.jpg
+Turmeric - DailyFresh,Spices,DailyFresh,8900000000194,kg,true,433.83,https://images.gbretail.com/194.jpg
+Turmeric - PureNature,Spices,PureNature,8900000000195,kg,true,227.92,https://images.gbretail.com/195.jpg
+Red Chili - FreshFarm,Spices,FreshFarm,8900000000196,kg,true,31.64,https://images.gbretail.com/196.jpg
+Red Chili - DailyFresh,Spices,DailyFresh,8900000000197,kg,true,50.7,https://images.gbretail.com/197.jpg
+Red Chili - PureNature,Spices,PureNature,8900000000198,kg,true,374.59,https://images.gbretail.com/198.jpg
+Coriander - FreshFarm,Spices,FreshFarm,8900000000199,kg,true,213.49,https://images.gbretail.com/199.jpg
+Coriander - DailyFresh,Spices,DailyFresh,8900000000200,kg,true,471.65,https://images.gbretail.com/200.jpg
+Coriander - PureNature,Spices,PureNature,8900000000201,kg,true,354.7,https://images.gbretail.com/201.jpg
+Cumin - FreshFarm,Spices,FreshFarm,8900000000202,kg,true,116.69,https://images.gbretail.com/202.jpg
+Cumin - DailyFresh,Spices,DailyFresh,8900000000203,kg,true,310.18,https://images.gbretail.com/203.jpg
+Cumin - PureNature,Spices,PureNature,8900000000204,kg,true,251.45,https://images.gbretail.com/204.jpg
+Garam Masala - FreshFarm,Spices,FreshFarm,8900000000205,kg,true,242.14,https://images.gbretail.com/205.jpg
+Garam Masala - DailyFresh,Spices,DailyFresh,8900000000206,kg,true,275.01,https://images.gbretail.com/206.jpg
+Garam Masala - PureNature,Spices,PureNature,8900000000207,kg,true,351.76,https://images.gbretail.com/207.jpg
+Black Pepper - FreshFarm,Spices,FreshFarm,8900000000208,kg,true,338.45,https://images.gbretail.com/208.jpg
+Black Pepper - DailyFresh,Spices,DailyFresh,8900000000209,kg,true,264.24,https://images.gbretail.com/209.jpg
+Black Pepper - PureNature,Spices,PureNature,8900000000210,kg,true,296.25,https://images.gbretail.com/210.jpg
+Cooking Oil - FreshFarm,Oils & Ghee,FreshFarm,8900000000211,liters,true,114.11,https://images.gbretail.com/211.jpg
+Cooking Oil - DailyFresh,Oils & Ghee,DailyFresh,8900000000212,liters,true,41.71,https://images.gbretail.com/212.jpg
+Cooking Oil - PureNature,Oils & Ghee,PureNature,8900000000213,liters,true,353.0,https://images.gbretail.com/213.jpg
+Mustard Oil - FreshFarm,Oils & Ghee,FreshFarm,8900000000214,liters,true,205.34,https://images.gbretail.com/214.jpg
+Mustard Oil - DailyFresh,Oils & Ghee,DailyFresh,8900000000215,liters,true,102.01,https://images.gbretail.com/215.jpg
+Mustard Oil - PureNature,Oils & Ghee,PureNature,8900000000216,liters,true,289.51,https://images.gbretail.com/216.jpg
+Coconut Oil - FreshFarm,Oils & Ghee,FreshFarm,8900000000217,liters,true,318.9,https://images.gbretail.com/217.jpg
+Coconut Oil - DailyFresh,Oils & Ghee,DailyFresh,8900000000218,liters,true,452.04,https://images.gbretail.com/218.jpg
+Coconut Oil - PureNature,Oils & Ghee,PureNature,8900000000219,liters,true,51.71,https://images.gbretail.com/219.jpg
+Ghee - FreshFarm,Oils & Ghee,FreshFarm,8900000000220,liters,true,456.53,https://images.gbretail.com/220.jpg
+Ghee - DailyFresh,Oils & Ghee,DailyFresh,8900000000221,liters,true,213.06,https://images.gbretail.com/221.jpg
+Ghee - PureNature,Oils & Ghee,PureNature,8900000000222,liters,true,246.76,https://images.gbretail.com/222.jpg
+Vanaspati - FreshFarm,Oils & Ghee,FreshFarm,8900000000223,liters,true,143.21,https://images.gbretail.com/223.jpg
+Vanaspati - DailyFresh,Oils & Ghee,DailyFresh,8900000000224,liters,true,302.15,https://images.gbretail.com/224.jpg
+Vanaspati - PureNature,Oils & Ghee,PureNature,8900000000225,liters,true,414.72,https://images.gbretail.com/225.jpg
+Bread - FreshFarm,Bakery,FreshFarm,8900000000226,pcs,false,300.3,https://images.gbretail.com/226.jpg
+Bread - DailyFresh,Bakery,DailyFresh,8900000000227,pcs,false,158.65,https://images.gbretail.com/227.jpg
+Bread - PureNature,Bakery,PureNature,8900000000228,pcs,false,467.32,https://images.gbretail.com/228.jpg
+Buns - FreshFarm,Bakery,FreshFarm,8900000000229,pcs,false,147.33,https://images.gbretail.com/229.jpg
+Buns - DailyFresh,Bakery,DailyFresh,8900000000230,pcs,false,169.55,https://images.gbretail.com/230.jpg
+Buns - PureNature,Bakery,PureNature,8900000000231,pcs,false,206.34,https://images.gbretail.com/231.jpg
+Cake - FreshFarm,Bakery,FreshFarm,8900000000232,pcs,false,414.37,https://images.gbretail.com/232.jpg
+Cake - DailyFresh,Bakery,DailyFresh,8900000000233,pcs,false,384.88,https://images.gbretail.com/233.jpg
+Cake - PureNature,Bakery,PureNature,8900000000234,pcs,false,96.38,https://images.gbretail.com/234.jpg
+Cookies - FreshFarm,Bakery,FreshFarm,8900000000235,pcs,false,327.32,https://images.gbretail.com/235.jpg
+Cookies - DailyFresh,Bakery,DailyFresh,8900000000236,pcs,false,338.96,https://images.gbretail.com/236.jpg
+Cookies - PureNature,Bakery,PureNature,8900000000237,pcs,false,186.76,https://images.gbretail.com/237.jpg
+Muffins - FreshFarm,Bakery,FreshFarm,8900000000238,pcs,false,101.19,https://images.gbretail.com/238.jpg
+Muffins - DailyFresh,Bakery,DailyFresh,8900000000239,pcs,false,82.15,https://images.gbretail.com/239.jpg
+Muffins - PureNature,Bakery,PureNature,8900000000240,pcs,false,308.23,https://images.gbretail.com/240.jpg
+Patties - FreshFarm,Bakery,FreshFarm,8900000000241,pcs,false,253.67,https://images.gbretail.com/241.jpg
+Patties - DailyFresh,Bakery,DailyFresh,8900000000242,pcs,false,274.27,https://images.gbretail.com/242.jpg
+Patties - PureNature,Bakery,PureNature,8900000000243,pcs,false,348.18,https://images.gbretail.com/243.jpg
+Canned Beans - FreshFarm,Canned Foods,FreshFarm,8900000000244,pcs,false,280.04,https://images.gbretail.com/244.jpg
+Canned Beans - DailyFresh,Canned Foods,DailyFresh,8900000000245,pcs,false,276.47,https://images.gbretail.com/245.jpg
+Canned Beans - PureNature,Canned Foods,PureNature,8900000000246,pcs,false,332.28,https://images.gbretail.com/246.jpg
+Canned Corn - FreshFarm,Canned Foods,FreshFarm,8900000000247,pcs,false,228.06,https://images.gbretail.com/247.jpg
+Canned Corn - DailyFresh,Canned Foods,DailyFresh,8900000000248,pcs,false,73.02,https://images.gbretail.com/248.jpg
+Canned Corn - PureNature,Canned Foods,PureNature,8900000000249,pcs,false,349.99,https://images.gbretail.com/249.jpg
+Canned Soup - FreshFarm,Canned Foods,FreshFarm,8900000000250,pcs,false,424.09,https://images.gbretail.com/250.jpg
+Canned Soup - DailyFresh,Canned Foods,DailyFresh,8900000000251,pcs,false,196.51,https://images.gbretail.com/251.jpg
+Canned Soup - PureNature,Canned Foods,PureNature,8900000000252,pcs,false,199.39,https://images.gbretail.com/252.jpg
+Canned Fruits - FreshFarm,Canned Foods,FreshFarm,8900000000253,pcs,false,413.68,https://images.gbretail.com/253.jpg
+Canned Fruits - DailyFresh,Canned Foods,DailyFresh,8900000000254,pcs,false,324.36,https://images.gbretail.com/254.jpg
+Canned Fruits - PureNature,Canned Foods,PureNature,8900000000255,pcs,false,248.15,https://images.gbretail.com/255.jpg
+Canned Tuna - FreshFarm,Canned Foods,FreshFarm,8900000000256,pcs,false,51.49,https://images.gbretail.com/256.jpg
+Canned Tuna - DailyFresh,Canned Foods,DailyFresh,8900000000257,pcs,false,227.6,https://images.gbretail.com/257.jpg
+Canned Tuna - PureNature,Canned Foods,PureNature,8900000000258,pcs,false,401.47,https://images.gbretail.com/258.jpg
+Baby Soap - FreshFarm,Baby Care,FreshFarm,8900000000259,pcs,false,497.08,https://images.gbretail.com/259.jpg
+Baby Soap - DailyFresh,Baby Care,DailyFresh,8900000000260,pcs,false,168.24,https://images.gbretail.com/260.jpg
+Baby Soap - PureNature,Baby Care,PureNature,8900000000261,pcs,false,432.08,https://images.gbretail.com/261.jpg
+Baby Powder - FreshFarm,Baby Care,FreshFarm,8900000000262,pcs,false,116.4,https://images.gbretail.com/262.jpg
+Baby Powder - DailyFresh,Baby Care,DailyFresh,8900000000263,pcs,false,233.58,https://images.gbretail.com/263.jpg
+Baby Powder - PureNature,Baby Care,PureNature,8900000000264,pcs,false,388.86,https://images.gbretail.com/264.jpg
+Diapers - FreshFarm,Baby Care,FreshFarm,8900000000265,pcs,false,71.0,https://images.gbretail.com/265.jpg
+Diapers - DailyFresh,Baby Care,DailyFresh,8900000000266,pcs,false,184.34,https://images.gbretail.com/266.jpg
+Diapers - PureNature,Baby Care,PureNature,8900000000267,pcs,false,260.46,https://images.gbretail.com/267.jpg
+Baby Lotion - FreshFarm,Baby Care,FreshFarm,8900000000268,pcs,false,415.16,https://images.gbretail.com/268.jpg
+Baby Lotion - DailyFresh,Baby Care,DailyFresh,8900000000269,pcs,false,468.77,https://images.gbretail.com/269.jpg
+Baby Lotion - PureNature,Baby Care,PureNature,8900000000270,pcs,false,35.57,https://images.gbretail.com/270.jpg
+Baby Wipes - FreshFarm,Baby Care,FreshFarm,8900000000271,pcs,false,297.08,https://images.gbretail.com/271.jpg
+Baby Wipes - DailyFresh,Baby Care,DailyFresh,8900000000272,pcs,false,198.08,https://images.gbretail.com/272.jpg
+Baby Wipes - PureNature,Baby Care,PureNature,8900000000273,pcs,false,246.31,https://images.gbretail.com/273.jpg
+Dog Food - FreshFarm,Pet Food,FreshFarm,8900000000274,kg,false,366.67,https://images.gbretail.com/274.jpg
+Dog Food - DailyFresh,Pet Food,DailyFresh,8900000000275,kg,false,111.0,https://images.gbretail.com/275.jpg
+Dog Food - PureNature,Pet Food,PureNature,8900000000276,kg,false,156.36,https://images.gbretail.com/276.jpg
+Cat Food - FreshFarm,Pet Food,FreshFarm,8900000000277,kg,false,163.26,https://images.gbretail.com/277.jpg
+Cat Food - DailyFresh,Pet Food,DailyFresh,8900000000278,kg,false,49.88,https://images.gbretail.com/278.jpg
+Cat Food - PureNature,Pet Food,PureNature,8900000000279,kg,false,65.46,https://images.gbretail.com/279.jpg
+Bird Seed - FreshFarm,Pet Food,FreshFarm,8900000000280,kg,false,294.13,https://images.gbretail.com/280.jpg
+Bird Seed - DailyFresh,Pet Food,DailyFresh,8900000000281,kg,false,61.16,https://images.gbretail.com/281.jpg
+Bird Seed - PureNature,Pet Food,PureNature,8900000000282,kg,false,48.21,https://images.gbretail.com/282.jpg
+Fish Food - FreshFarm,Pet Food,FreshFarm,8900000000283,kg,false,51.36,https://images.gbretail.com/283.jpg
+Fish Food - DailyFresh,Pet Food,DailyFresh,8900000000284,kg,false,450.06,https://images.gbretail.com/284.jpg
+Fish Food - PureNature,Pet Food,PureNature,8900000000285,kg,false,328.31,https://images.gbretail.com/285.jpg
