@@ -31,7 +31,7 @@ export async function closeTestPrisma(): Promise<void> {
 export async function truncateAll(): Promise<void> {
   const p = testPrisma();
   await p.$executeRawUnsafe(
-    `TRUNCATE "Session","LedgerEntry","OrderItem","Order","Customer","OnlineUser","ProductBatch","StockTransferItem","StockTransfer","Product","ShopOrderSeq","Counter","User","Shop" RESTART IDENTITY CASCADE`
+    `TRUNCATE "Session","LedgerEntry","OrderItem","Order","Customer","OnlineUser","ProductBatch","StockTransferItem","StockTransfer","Product","ShopProduct","ShopProductBatch","MasterProduct","ShopOrderSeq","Counter","User","Shop" RESTART IDENTITY CASCADE`
   );
 }
 
@@ -63,5 +63,26 @@ export async function seedShop(): Promise<Seed> {
   const p1 = await mk("ptest1", "Test Prod 1", 100);
   const p2 = await mk("ptest2", "Test Prod 2", 50);
   const p3 = await mk("ptest3", "Test Prod 3", 25);
+
+  // MasterProducts + ShopProducts for the online storefront (common inventory)
+  const mp1 = await p.masterProduct.create({
+    data: { id: "mp1", name: "Test Prod 1", category: "Test", unit: "pcs", basePrice: 100, isActive: true } as any,
+  });
+  const mp2 = await p.masterProduct.create({
+    data: { id: "mp2", name: "Test Prod 2", category: "Test", unit: "pcs", basePrice: 50, isActive: true } as any,
+  });
+  const mp3 = await p.masterProduct.create({
+    data: { id: "mp3", name: "Test Prod 3", category: "Test", unit: "pcs", basePrice: 25, isActive: true } as any,
+  });
+  await p.shopProduct.create({
+    data: { id: "sp1", shopId: shop.id, masterProductId: mp1.id, isEnabled: true, isOnline: false, stockQuantity: 100, lowStockThreshold: 5, costPrice: 70 } as any,
+  });
+  await p.shopProduct.create({
+    data: { id: "sp2", shopId: shop.id, masterProductId: mp2.id, isEnabled: true, isOnline: false, stockQuantity: 100, lowStockThreshold: 5, costPrice: 35 } as any,
+  });
+  await p.shopProduct.create({
+    data: { id: "sp3", shopId: shop.id, masterProductId: mp3.id, isEnabled: true, isOnline: false, stockQuantity: 100, lowStockThreshold: 5, costPrice: 17.5 } as any,
+  });
+
   return { shopId: shop.id, ownerId: owner.id, staffId: staff.id, counterId: counter.id, productIds: [p1.id, p2.id, p3.id] };
 }

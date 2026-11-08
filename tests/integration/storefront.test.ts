@@ -16,6 +16,7 @@ beforeEach(async () => {
   const p = testPrisma();
   await p.shop.update({ where: { id: "shop_test" }, data: { city: "TestCity", isOnlineEnabled: true } });
   await p.product.update({ where: { id: "ptest1" }, data: { isOnline: true, onlinePrice: 120 } as any });
+  await p.shopProduct.update({ where: { id: "sp1" }, data: { isOnline: true, onlinePrice: 120 } as any });
 });
 
 async function registerGlobal(
@@ -40,7 +41,7 @@ describe("storefront (global online identity on core backend)", () => {
     expect(shops.shops[0].id).toBe("shop_test");
     const prods = await (await app.request("/api/store/shops/shop_test/products")).json() as any;
     expect(prods.total).toBe(1);
-    expect(prods.products[0].id).toBe("ptest1");
+    expect(prods.products[0].id).toBe("sp1");
     expect(prods.products[0].effectivePrice).toBe(120);
     expect(prods.products[0].costPrice).toBeUndefined();
   });
