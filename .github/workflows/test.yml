@@ -31,6 +31,9 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      # Prisma 7 ships @prisma/client as an empty stub until generated —
+      # db:extensions, typecheck and tests all need the generated client.
+      - run: npx prisma generate
       - run: npx prisma migrate deploy
       - run: npm run db:extensions
       - run: npm run typecheck

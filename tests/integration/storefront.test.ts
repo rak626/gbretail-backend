@@ -126,6 +126,40 @@ describe("storefront (global online identity on core backend)", () => {
     expect(((await ordersRes.json()) as any).orders.length).toBe(1);
   });
 
+  it("checkout resolves ShopProduct ids from the storefront catalog; cancel restores its stock", async () => {
+    const reg = await registerGlobal({}, "9876543260", "shopcat@online.test");
+    expect(reg.status).toBe(201);
+    const token = ((await reg.json()) as any).accessToken as string;
+
+    // Both ids set — exactly what the online cart sends after add-to-cart
+    const res = await app.request("/api/store/orders", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ shopId: "shop_test", items: [{ productId: "sp1", shopProductId: "sp1", qty: 2 }], fulfilment: "pickup" }),
+    });
+    expect(res.status).toBe(201);
+    const order = ((await res.json()) as any).order;
+    expect(Number(order.total)).toBe(240); // sp1 onlinePrice 120 x 2
+
+    const item = order.items[0];
+    expect(item.shopProductId).toBe("sp1");
+    expect(item.productId).toBeNull();
+    expect(Number(item.costPrice)).toBe(70);
+
+    // Shared inventory lives on the ShopProduct row; legacy Product untouched
+    const p = testPrisma();
+    expect(Number(((await p.shopProduct.findUnique({ where: { id: "sp1" } })) as any).stockQuantity)).toBe(98);
+    expect(Number(((await p.product.findUnique({ where: { id: "ptest1" } })) as any).stockQuantity)).toBe(100);
+
+    // Cancel hands the stock back
+    const cancel = await app.request(`/api/store/orders/${order.id}/cancel`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(cancel.status).toBe(200);
+    expect(Number(((await p.shopProduct.findUnique({ where: { id: "sp1" } })) as any).stockQuantity)).toBe(100);
+  });
+
   it("one account orders from two shops; myOrders spans both", async () => {
     const p = testPrisma();
     await p.shop.create({ data: { id: "shop_two", code: "GB-TEST-2", name: "Second Shop", isOnlineEnabled: true } });

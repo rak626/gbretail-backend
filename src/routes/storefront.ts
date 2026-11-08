@@ -11,9 +11,10 @@ import jwt from "jsonwebtoken";
 import { prisma } from "../lib/prisma.js";
 import { config } from "../config.js";
 import { normalizePhone, normalizeEmail } from "../lib/normalize.js";
-import { round2, parseMoney, dec, MAX_MONEY } from "../lib/money.js";
+import { round2, dec } from "../lib/money.js";
 import { toAppError, AppError } from "../lib/errors.js";
 import { getIdempotencyKey, isValidIdempotencyKey, fingerprint } from "../lib/idempotency.js";
+import { resolveCheckoutLines } from "../lib/storefront-checkout.js";
 
 const store = new Hono();
 
@@ -73,17 +74,32 @@ function publicShop(s: any) {
   };
 }
 
-function effectivePrice(p: any): number {
-  const online = p.onlinePrice != null ? dec(p.onlinePrice) : NaN;
-  if (!isNaN(online) && online >= 0) return round2(online);
-  if (p.price != null) return round2(dec(p.price));
-  if (p.rate_per_kg != null) return round2(dec(p.rate_per_kg));
-  return NaN;
-}
-
-function publicProduct(p: any) {
-  const { costPrice: _omit, ...rest } = p;
-  return { ...rest, effectivePrice: effectivePrice(p) };
+// Public ShopProduct projection for storefront listings — mirrors
+// gbretail-catalog's OnlineStoreService.publicProduct (never leaks costPrice).
+function publicShopProduct(sp: any) {
+  const mp = sp.masterProduct ?? {};
+  const loose = !!mp.is_loose;
+  const price = sp.shopPrice != null ? dec(sp.shopPrice) : mp.basePrice != null ? dec(mp.basePrice) : null;
+  const online = sp.onlinePrice != null ? dec(sp.onlinePrice) : null;
+  return {
+    id: sp.id,
+    shopId: sp.shopId,
+    name: mp.name ?? sp.id,
+    category: mp.category ?? null,
+    unit: mp.unit ?? "pcs",
+    is_loose: loose,
+    price,
+    rate_per_kg: loose ? price : null,
+    onlinePrice: online,
+    effectivePrice: online ?? price ?? 0,
+    imageUrl: mp.imageUrl ?? null,
+    stockQuantity: Math.floor(dec(sp.stockQuantity)),
+    barcode: sp.shopBarcode ?? mp.barcode ?? null,
+    brand: mp.brand ?? null,
+    lowStockThreshold: dec(sp.lowStockThreshold),
+    preset_weights: (mp.preset_weights ?? []).map((v: unknown) => dec(v)),
+    preset_prices: (mp.preset_prices ?? []).map((v: unknown) => dec(v)),
+  };
 }
 
 async function ensureOnlineShop(shopId: string) {
@@ -146,6 +162,8 @@ store.get("/shops/:id", async (c) => {
 });
 
 // GET /api/store/shops/:id/products?search&category&limit&page
+// Serves the ShopProduct catalog (master-product join) — same contract and
+// filter semantics as gbretail-catalog's OnlineStoreService.products().
 store.get("/shops/:id/products", async (c) => {
   try {
     const shopId = c.req.param("id");
@@ -154,17 +172,38 @@ store.get("/shops/:id/products", async (c) => {
     const category = c.req.query("category") ?? "All";
     const limit = Math.min(Math.max(parseInt(c.req.query("limit") ?? "60", 10) || 60, 1), 100);
     const page = Math.max(parseInt(c.req.query("page") ?? "1", 10) || 1, 1);
-    const where: any = { shopId, deletedAt: null, isOnline: true, stockQuantity: { gt: 0 } };
-    if (search) where.OR = [{ name: { contains: search, mode: "insensitive" } }, { barcode: { contains: search, mode: "insensitive" } }];
+    const where: any = {
+      shopId,
+      deletedAt: null,
+      isEnabled: true,
+      isOnline: true,
+      stockQuantity: { gt: 0 },
+      masterProduct: { deletedAt: null, isActive: true },
+    };
+    if (search) {
+      where.OR = [
+        { masterProduct: { name: { contains: search, mode: "insensitive" } } },
+        { masterProduct: { barcode: { contains: search, mode: "insensitive" } } },
+        { shopBarcode: { contains: search, mode: "insensitive" } },
+      ];
+    }
     if (category && category !== "All") {
-      if (category === "Loose Items") where.is_loose = true;
-      else where.category = category;
+      where.masterProduct = {
+        ...where.masterProduct,
+        ...(category === "Loose Items" ? { is_loose: true } : { category }),
+      };
     }
     const [items, total] = await Promise.all([
-      prisma.product.findMany({ where, orderBy: { name: "asc" }, take: limit, skip: (page - 1) * limit }),
-      prisma.product.count({ where }),
+      prisma.shopProduct.findMany({
+        where,
+        include: { masterProduct: true },
+        orderBy: { masterProduct: { name: "asc" } },
+        take: limit,
+        skip: (page - 1) * limit,
+      }),
+      prisma.shopProduct.count({ where }),
     ]);
-    return c.json({ products: (items as any[]).map(publicProduct), total, page, limit });
+    return c.json({ products: (items as any[]).map(publicShopProduct), total, page, limit });
   } catch (e) {
     if (e instanceof AppError) return c.json({ error: e.message, code: e.code }, e.status as 403 | 404);
     const appErr = toAppError(e);
@@ -281,27 +320,9 @@ store.post("/orders", requireCustomerAuth as any, async (c) => {
     idemKey = getIdempotencyKey(c, body);
     if (idemKey && !isValidIdempotencyKey(idemKey)) return c.json({ error: "Invalid Idempotency-Key", code: "INVALID_IDEMPOTENCY_KEY" }, 400);
 
-    // Resolve products server-side — onlinePrice first, only isOnline + in stock.
-    const ids = [...new Set(items.map((it: any) => String(it.productId ?? "")))].filter(Boolean);
-    if (ids.length !== items.length) return c.json({ error: "Duplicate productId in items" }, 400);
-    const dbProds: any[] = await prisma.product.findMany({ where: { id: { in: ids } } });
-    const byId = new Map(dbProds.map((p: any) => [p.id, p]));
-    let gross = 0;
-    const lines: any[] = [];
-    for (const it of items) {
-      const pid = String(it.productId);
-      const qty = Number(it.qty ?? it.quantity ?? it.weight ?? 0);
-      if (!Number.isFinite(qty) || qty <= 0 || qty > 999) return c.json({ error: `Invalid qty for item` }, 400);
-      const p: any = byId.get(pid);
-      if (!p || p.deletedAt) return c.json({ error: "Product not available", code: "PRODUCT_UNAVAILABLE" }, 409);
-      if (p.shopId !== shopId) return c.json({ error: "Product belongs to another shop" }, 403);
-      if (!p.isOnline) return c.json({ error: `Not available online: ${p.name}`, code: "NOT_ONLINE" }, 409);
-      const unitPrice = effectivePrice(p);
-      if (!Number.isFinite(unitPrice) || unitPrice < 0 || unitPrice > MAX_MONEY) return c.json({ error: `Bad price: ${p.name}` }, 409);
-      const lineTotal = round2(unitPrice * qty);
-      gross = round2(gross + lineTotal);
-      lines.push({ p, qty, unitPrice, lineTotal });
-    }
+    // Resolve prices/availability server-side — ShopProduct catalog first
+    // (listings serve ShopProduct ids), legacy Product rows as fallback.
+    const { lines, gross } = await resolveCheckoutLines(items, shopId);
     // Delivery fee / minimums from shop online config
     let deliveryFee = 0;
     if (fulfilment === "delivery") {
@@ -313,7 +334,7 @@ store.post("/orders", requireCustomerAuth as any, async (c) => {
     const minOrder = dec(shop.minOrderAmount);
     if (minOrder > 0 && total < minOrder) return c.json({ error: `Minimum order is ₹${minOrder.toFixed(2)}`, code: "MIN_ORDER" }, 422);
 
-    orderFingerprint = idemKey ? fingerprint({ total, fulfilment, shopId, items: lines.map((l) => ({ productId: l.p.id, qty: l.qty, lineTotal: l.lineTotal })), customer: cust.id }) : null;
+    orderFingerprint = idemKey ? fingerprint({ total, fulfilment, shopId, items: lines.map((l) => ({ productId: l.ref, qty: l.qty, lineTotal: l.lineTotal })), customer: cust.id }) : null;
     if (idemKey) {
       const dup: any = await prisma.order.findFirst({ where: { shopId, idempotencyKey: idemKey }, include: { items: true } });
       if (dup) {
@@ -353,18 +374,31 @@ store.post("/orders", requireCustomerAuth as any, async (c) => {
           channel: "online", fulfilment, deliveryAddress, deliveryPhone, notes,
           ...(idemKey ? { idempotencyKey: idemKey, idempotencyFingerprint: orderFingerprint } : {}),
           items: {
-            create: lines.map((l) => ({
-              productId: l.p.id, name: l.p.name, price: l.unitPrice, unit: l.p.unit ?? "pcs",
-              quantity: l.p.is_loose ? null : l.qty, weight: l.p.is_loose ? l.qty : null,
-              lineTotal: l.lineTotal, isCustom: false, costPrice: dec(l.p.costPrice), category: l.p.category ?? null,
-            })),
+            create: lines.map((l) =>
+              l.kind === "shop"
+                ? {
+                    productId: null, shopProductId: l.sp.id, name: l.mp.name, price: l.unitPrice,
+                    unit: l.mp.unit ?? "pcs",
+                    quantity: l.mp.is_loose ? null : l.qty, weight: l.mp.is_loose ? l.qty : null,
+                    lineTotal: l.lineTotal, isCustom: false, costPrice: dec(l.sp.costPrice), category: l.mp.category ?? null,
+                  }
+                : {
+                    productId: l.p.id, shopProductId: null, name: l.p.name, price: l.unitPrice,
+                    unit: l.p.unit ?? "pcs",
+                    quantity: l.p.is_loose ? null : l.qty, weight: l.p.is_loose ? l.qty : null,
+                    lineTotal: l.lineTotal, isCustom: false, costPrice: dec(l.p.costPrice), category: l.p.category ?? null,
+                  }
+            ),
           },
         },
         include: { items: true },
       });
       for (const l of lines) {
-        const res = await tx.product.updateMany({ where: { id: l.p.id, stockQuantity: { gte: l.qty } }, data: { stockQuantity: { decrement: l.qty } } });
-        if (res.count === 0) throw new AppError(409, `Out of stock: ${l.p.name}`, "OUT_OF_STOCK");
+        const res =
+          l.kind === "shop"
+            ? await tx.shopProduct.updateMany({ where: { id: l.sp.id, stockQuantity: { gte: l.qty } }, data: { stockQuantity: { decrement: l.qty } } })
+            : await tx.product.updateMany({ where: { id: l.p.id, stockQuantity: { gte: l.qty } }, data: { stockQuantity: { decrement: l.qty } } });
+        if (res.count === 0) throw new AppError(409, `Out of stock: ${l.kind === "shop" ? l.mp.name : l.p.name}`, "OUT_OF_STOCK");
       }
       const now = new Date();
       await tx.customer.update({ where: { id: posCust.id }, data: { totalSpent: { increment: total }, totalOrders: { increment: 1 }, lastOrderAt: now } });
@@ -422,9 +456,15 @@ store.post("/orders/:id/cancel", requireCustomerAuth as any, async (c) => {
     await prisma.$transaction(async (tx: any) => {
       await tx.order.update({ where: { id }, data: { status: "cancelled" } });
       for (const it of existing.items) {
-        if (!it.isCustom && it.productId) {
-          const qty = Number(it.quantity ?? it.weight ?? 0);
-          if (qty > 0) await tx.product.updateMany({ where: { id: String(it.productId) }, data: { stockQuantity: { increment: qty } } });
+        if (it.isCustom) continue;
+        const qty = Number(it.quantity ?? it.weight ?? 0);
+        if (qty <= 0) continue;
+        // Shop lines win when both ids are present — mirrors order creation,
+        // which only decrements the ShopProduct row for shop lines.
+        if (it.shopProductId) {
+          await tx.shopProduct.updateMany({ where: { id: String(it.shopProductId) }, data: { stockQuantity: { increment: qty } } });
+        } else if (it.productId) {
+          await tx.product.updateMany({ where: { id: String(it.productId) }, data: { stockQuantity: { increment: qty } } });
         }
       }
       if (existing.customerId) {
