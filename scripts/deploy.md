@@ -1,9 +1,10 @@
 # GB Retail — Production Deploy Checklist
 
 ## Prerequisites
-- PostgreSQL database (Neon, RDS, or self-hosted) accessible from the backend
-- Cloudflare account (for Workers) or Vercel account (for frontend)
-- Domain names configured for each shop + online storefront
+- Cloudflare account + `npx wrangler login` (hosts the backend)
+- Vercel account + `npx vercel login` (hosts the POS frontend)
+- Neon Postgres (free tier OK) reachable from the edge — use the pooled/HTTP URL with `USE_NEON=1`
+- Optional: custom domains — free `*.workers.dev` / `*.vercel.app` URLs work without one
 
 ## Step 1: Configure environment variables
 
@@ -37,7 +38,7 @@ npx prisma generate
 npx prisma migrate deploy
 ```
 
-This applies all 7 migrations including the batch/transfer schema.
+This applies all 9 migrations (baseline → online storefront → hardening → batch/expiry → MasterProduct/ShopProduct).
 
 ## Step 3: Seed initial data
 
@@ -49,6 +50,10 @@ This creates:
 - 3 shops: GB-SHOP-1001 (Main Bazaar), GB-SHOP-1002 (East End), GB-SHOP-1003 (West Side)
 - Each shop: 2 counters, 25 products, 2 batches per product (staggered expiry: 5-day + 45-day)
 - Users: super@gbretail.local + owner/staff per shop (passwords from SEED_* env vars)
+
+> **Production:** set strong `SEED_SUPER_PASSWORD` / `SEED_OWNER_PASSWORD` /
+> `SEED_STAFF_PASSWORD` *before* seeding. The defaults (`super123` / `owner123` /
+> `staff123`) must never reach a production database.
 
 ## Step 4: Deploy backend
 
@@ -67,9 +72,16 @@ vercel deploy --prod
 ### POS (each shop device)
 ```bash
 cd gbretail-pos
-# Set NEXT_PUBLIC_API_URL to your backend URL
+# Set NEXT_PUBLIC_API_URL to your backend URL (baked in at build time —
+# set it in the Vercel project settings so dashboard builds get it too)
 NEXT_PUBLIC_API_URL=https://gbretail-backend.yourdomain.com npm run build
 vercel deploy --prod   # or your preferred host
+```
+
+Then add the POS origin to the backend CORS allow-list — credentials mode
+rejects unknown origins, so the POS will fail every API call otherwise:
+```bash
+npx wrangler var put CORS_ORIGIN   # e.g. "https://pos.yourdomain.com"
 ```
 
 ### Online storefront (customer-facing)
