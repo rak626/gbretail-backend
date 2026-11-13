@@ -208,7 +208,8 @@ async function main() {
   const shop2 = await seedShop(2, "GB-SHOP-1002", "East End Grocery", "East", "East Street, East End");
   const shop3 = await seedShop(3, "GB-SHOP-1003", "West Side Mart", "West", "West Avenue, West Side");
 
-  console.log("[SEED] Users: super@gbretail.local / owner1@shop.local / owner2@shop.local / owner3@shop.local / staff1@shop.local / staff2@shop.local / staff3@shop.local (pw: super123 / owner123 / staff123)");
+  const pwSource = process.env.SEED_SUPER_PASSWORD ? "SEED_* env (custom)" : "defaults (super123/owner123/staff123)";
+  console.log(`[SEED] Users: super@gbretail.local / owner1@shop.local / owner2@shop.local / owner3@shop.local / staff1@shop.local / staff2@shop.local / staff3@shop.local (pw: ${pwSource})`);
   console.log(`[SEED] Shops: ${shop1.name} (${shop1.code}), ${shop2.name} (${shop2.code}), ${shop3.name} (${shop3.code})`);
 }
 

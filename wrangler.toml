@@ -5,13 +5,15 @@ compatibility_flags = ["nodejs_compat"]
 
 [vars]
 PORT = "8787"
-CORS_ORIGIN = "http://localhost:3000,http://localhost:3001"
+# Comma-separated browser origins allowed with credentials (prod POS + local dev).
+# Cloudflare deploys vars from this file — wrangler 3 has no `var put` command.
+CORS_ORIGIN = "https://gbretail-pos.vercel.app,http://localhost:3000,http://localhost:3001"
 USE_NEON = "1"
 NODE_ENV = "production"
 WORKER = "1"
 
-# CORS_ORIGIN — set to your production frontend URLs via `wrangler var put CORS_ORIGIN`
-# e.g. "https://shop1.yourdomain.com,https://shop2.yourdomain.com,https://online.yourdomain.com"
+# CORS_ORIGIN — add production frontend origins here and redeploy, e.g.
+# "https://shop1.yourdomain.com,https://pos.yourdomain.com,https://online.yourdomain.com"
 
 # Secrets (set via `wrangler secret put DATABASE_URL`)
 # DATABASE_URL = "postgresql://..."

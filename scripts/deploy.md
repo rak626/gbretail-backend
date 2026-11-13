@@ -38,7 +38,7 @@ npx prisma generate
 npx prisma migrate deploy
 ```
 
-This applies all 9 migrations (baseline → online storefront → hardening → batch/expiry → MasterProduct/ShopProduct).
+This applies all 8 migrations (baseline → online storefront → hardening → batch/expiry → MasterProduct/ShopProduct).
 
 ## Step 3: Seed initial data
 
@@ -78,10 +78,11 @@ NEXT_PUBLIC_API_URL=https://gbretail-backend.yourdomain.com npm run build
 vercel deploy --prod   # or your preferred host
 ```
 
-Then add the POS origin to the backend CORS allow-list — credentials mode
-rejects unknown origins, so the POS will fail every API call otherwise:
-```bash
-npx wrangler var put CORS_ORIGIN   # e.g. "https://pos.yourdomain.com"
+Then make sure the POS origin is in the backend's CORS allow-list — credentials
+mode rejects unknown origins. Non-secret vars live in `wrangler.toml [vars]`
+(wrangler 3 has no `var put`), so edit `CORS_ORIGIN` there and redeploy:
+```toml
+CORS_ORIGIN = "https://pos.yourdomain.com"
 ```
 
 ### Online storefront (customer-facing)
@@ -97,7 +98,6 @@ vercel deploy --prod   # or your preferred host
 - [ ] All 3 shops visible: `GET https://api.yourdomain.com/api/shops` (as SUPER_ADMIN)
 - [ ] POS loads at each shop device, can browse catalog
 - [ ] Test sale creates order and decrements stock
-- [ ] Test offline: disconnect network, create sale, reconnect, verify auto-sync
 - [ ] Test batch restock with expiry date
 - [ ] Test inter-shop transfer request → approve → receive
 - [ ] Receipt printing shows shop GSTIN/UPI/receipt name
