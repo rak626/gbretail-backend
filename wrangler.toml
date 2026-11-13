@@ -7,7 +7,7 @@ compatibility_flags = ["nodejs_compat"]
 PORT = "8787"
 # Comma-separated browser origins allowed with credentials (prod POS + local dev).
 # Cloudflare deploys vars from this file — wrangler 3 has no `var put` command.
-CORS_ORIGIN = "https://gbretail-pos.vercel.app,http://localhost:3000,http://localhost:3001"
+CORS_ORIGIN = "https://gbretail-pos-app.vercel.app,http://localhost:3000,http://localhost:3001"
 USE_NEON = "1"
 NODE_ENV = "production"
 WORKER = "1"
