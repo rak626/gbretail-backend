@@ -1,8 +1,21 @@
 {
-  "name": "gbretail-backend",
+  "name": "@gbretail/backend",
   "version": "1.0.0",
-  "private": true,
   "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./app": {
+      "types": "./dist/app.d.ts",
+      "import": "./dist/app.js"
+    }
+  },
+  "files": [
+    "dist",
+    "prisma"
+  ],
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "dev:edge": "wrangler dev --port 8787",
