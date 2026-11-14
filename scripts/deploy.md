@@ -1,10 +1,32 @@
 # GB Retail — Production Deploy Checklist
 
+## Production topology (current)
+
+```
+browser ──► https://gbretail-pos-web.vercel.app        (Vercel, one project)
+             ├── /            Next.js POS UI
+             └── /api/*       Hono API mounted in the same deployment
+                              → Neon Postgres (HTTP driver, USE_NEON=1)
+```
+
+The API is a **package inside the POS project** (`@gbretail/backend`), so there is
+exactly one origin, one Vercel login, and no cross-site cookie problem. The
+Cloudflare Worker (`gbretail-backend.<sub>.workers.dev`) stays deployed as the
+**free fallback**: set `API_PROXY_TARGET` on the POS project and the existing
+rewrite forwards `/api/*` to it.
+
 ## Prerequisites
-- Cloudflare account + `npx wrangler login` (hosts the backend)
-- Vercel account + `npx vercel login` (hosts the POS frontend)
-- Neon Postgres (free tier OK) reachable from the edge — use the pooled/HTTP URL with `USE_NEON=1`
-- Optional: custom domains — free `*.workers.dev` / `*.vercel.app` URLs work without one
+- Vercel account + `npx vercel login` (hosts the POS **and** the API)
+- Cloudflare account + `npx wrangler login` (optional — only for the Worker fallback)
+- Neon Postgres (free tier OK) — use the pooled/HTTP URL with `USE_NEON=1`
+- Optional: custom domains — free `*.vercel.app` URLs work without one
+
+> **Vercel gotcha:** the POS project's **framework preset must be `nextjs`**.
+> A project created with `vercel project create` leaves it empty, and Vercel then
+> builds it as a *static* site (it serves the repo's `public/` folder and never
+> creates the serverless function) — every URL answers `NOT_FOUND`.
+> Check: `vercel project inspect <name>` → "Framework Preset: Next.js".
+
 
 ## Step 1: Configure environment variables
 
@@ -55,35 +77,56 @@ This creates:
 > `SEED_STAFF_PASSWORD` *before* seeding. The defaults (`super123` / `owner123` /
 > `staff123`) must never reach a production database.
 
-## Step 4: Deploy backend
+## Step 4: Publish the API package (when the API changes)
 
-Cloudflare Workers (recommended — edge, never sleeps):
+The POS project consumes the backend as a release tarball, so every backend
+change needs a new release:
+
 ```bash
-wrangler deploy
+cd gbretail-backend
+npm run build
+npm pack                       # honours .npmignore -> ships dist/ + prisma/
+gh release create v1.0.1 gbretail-backend-1.0.1.tgz \
+  --repo rak626/gbretail-backend --title "v1.0.1" --notes "API package"
 ```
 
-Vercel Edge:
-```bash
-vercel deploy --prod
-```
-
-## Step 5: Deploy frontends
-
-### POS (each shop device)
+Then point the POS at the new tarball:
 ```bash
 cd gbretail-pos
-# Set NEXT_PUBLIC_API_URL to your backend URL (baked in at build time —
-# set it in the Vercel project settings so dashboard builds get it too)
-NEXT_PUBLIC_API_URL=https://gbretail-backend.yourdomain.com npm run build
-vercel deploy --prod   # or your preferred host
+npm i https://github.com/rak626/gbretail-backend/releases/download/v1.0.1/gbretail-backend-1.0.1.tgz
 ```
 
-Then make sure the POS origin is in the backend's CORS allow-list — credentials
-mode rejects unknown origins. Non-secret vars live in `wrangler.toml [vars]`
-(wrangler 3 has no `var put`), so edit `CORS_ORIGIN` there and redeploy:
-```toml
-CORS_ORIGIN = "https://pos.yourdomain.com"
+## Step 5: Deploy the POS (UI + API)
+
+```bash
+cd gbretail-pos
+npx vercel link --yes --project gbretail-pos-web
+npx vercel deploy --prod --yes
 ```
+
+Production environment variables on the Vercel project:
+
+| Variable | Value |
+|---|---|
+| `DATABASE_URL` | Neon pooled URL (`?schema=public`) |
+| `JWT_ACCESS_SECRET` / `JWT_REFRESH_SECRET` | strong random secrets (32+ chars) |
+| `USE_NEON` | `1` (HTTP driver — no TCP in a serverless function) |
+| `NODE_ENV` | `production` |
+| `CORS_ORIGIN` | the POS origin (only matters for the Worker fallback) |
+| `NEXT_PUBLIC_API_URL` | **unset** — the API is same-origin, so client calls use relative `/api/*` URLs |
+| `API_PROXY_TARGET` | **unset** — set it only to fall back to the Worker |
+
+### Worker fallback (optional, free)
+
+The Worker keeps the same API on Cloudflare's edge (~50 ms cold start):
+```bash
+cd gbretail-backend
+npx wrangler deploy
+```
+To use it, set `API_PROXY_TARGET=https://gbretail-backend.<sub>.workers.dev`
+on the Vercel project and redeploy — the rewrite forwards `/api/*` there.
+Note the Worker and the Vercel deployment use **separate JWT secrets**, so a
+fallback switch invalidates in-flight sessions (staff log in again).
 
 ### Online storefront (customer-facing)
 ```bash
@@ -94,8 +137,10 @@ vercel deploy --prod   # or your preferred host
 
 ## Step 6: Verify
 
-- [ ] Backend health: `GET https://api.yourdomain.com/api/health` → `{ status: "ok", db: "ok" }`
-- [ ] All 3 shops visible: `GET https://api.yourdomain.com/api/shops` (as SUPER_ADMIN)
+- [ ] POS origin health: `GET https://gbretail-pos-web.vercel.app/api/health` → `{ status: "ok", db: "connected" }`
+- [ ] Login sets **two** `Set-Cookie` headers (`accessToken` + `refreshToken`) — one means refresh is broken
+- [ ] `POST /api/auth/refresh` with the cookie jar → 200
+- [ ] All 3 shops visible: `GET /api/shops` (as SUPER_ADMIN)
 - [ ] POS loads at each shop device, can browse catalog
 - [ ] Test sale creates order and decrements stock
 - [ ] Test batch restock with expiry date
