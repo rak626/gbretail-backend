@@ -7,3 +7,6 @@ dist
 *.tsbuildinfo
 coverage
 .DS_Store
+
+# npm pack output (release artifacts)
+*.tgz
