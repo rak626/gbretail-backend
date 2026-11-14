@@ -1,0 +1,16 @@
+# Files shipped in the npm tarball (@gbretail/backend).
+# .npmignore overrides .gitignore, so `dist/` ships even though it is gitignored.
+# Keep in sync with the "files" whitelist in package.json.
+node_modules
+src
+tests
+scripts
+.github
+coverage
+.env
+.env.local
+.env.*
+!.env.example
+*.tsbuildinfo
+*.log
+.DS_Store
