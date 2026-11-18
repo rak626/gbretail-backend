@@ -27,6 +27,18 @@ rewrite forwards `/api/*` to it.
 > creates the serverless function) — every URL answers `NOT_FOUND`.
 > Check: `vercel project inspect <name>` → "Framework Preset: Next.js".
 
+> **Second gotcha — local `.env` files:** the Vercel CLI uploads them, and Next
+> inlines `NEXT_PUBLIC_*` at build time. A developer `.env` containing
+> `NEXT_PUBLIC_API_URL=http://localhost:8080` once made the deployed UI call
+> localhost even though every server-side curl check passed. The POS repo now
+> has `.vercelignore` (`.env`, `.env.*`) and its `build` script runs
+> `scripts/check-client-bundle.mjs`, which fails the build if any absolute
+> localhost URL reaches `.next/static`. Never set `NEXT_PUBLIC_API_URL` on the
+> Vercel project — same origin is the production configuration.
+
+Since backend `v1.0.1`, the mounted Hono app also fails closed **per request**
+when `NODE_ENV=production` and the JWT secrets are missing/dev defaults; the
+Worker entrypoint still has its own guard.
 
 ## Step 1: Configure environment variables
 
