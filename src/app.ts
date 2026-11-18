@@ -3,7 +3,7 @@ import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { secureHeaders } from "hono/secure-headers";
 import { bodyLimit } from "hono/body-limit";
-import { config, validateCorsOrigins } from "./config.js";
+import { config, validateCorsOrigins, assertProductionSecrets } from "./config.js";
 import { toAppError } from "./lib/errors.js";
 
 import health from "./routes/health.js";
@@ -32,6 +32,18 @@ export function createApp() {
       applyEnv((c.env ?? {}) as Record<string, string | undefined>);
     } catch {
       // Node: c.env empty — process.env already used.
+    }
+    await next();
+  });
+
+  // Fail closed in production if secrets are missing or still the dev defaults.
+  // This must run per request (after c.env is applied) and live here, not only
+  // in the Node/Worker entrypoints — the Vercel mount imports ./app directly.
+  app.use("*", async (c, next) => {
+    try {
+      assertProductionSecrets();
+    } catch (e) {
+      return c.json({ error: (e as Error).message, code: "PRODUCTION_CONFIG" }, 500);
     }
     await next();
   });
